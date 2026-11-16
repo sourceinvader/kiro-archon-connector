@@ -25,9 +25,13 @@ to signalling only the `kiro-cli` process (process groups are POSIX).
 
 ## Quick start
 
-1. **Archon 0.13.2 or newer.** Provider plugins need plugin protocol 3, which arrived in
-   Archon 0.13.2 (`brew upgrade archon`, or a binary from the
-   [releases page](https://github.com/coleam00/Archon/releases)).
+**[INSTALL.md](INSTALL.md)** walks through installing the latest Archon and this plugin from
+the private GitHub repository, with the expected output of each step and troubleshooting.
+The short version:
+
+1. **Archon 0.13.2 or newer.** The plugin speaks plugin protocol 3. 0.13.0 used protocol 2,
+   and 0.13.2 is the oldest release tested (`brew upgrade archon` gives 0.13.2; the
+   [installer](https://archon.diy/getting-started/installation/) gives the latest).
 2. **Kiro CLI, signed in.** `kiro-cli login` (or set `KIRO_API_KEY` for a headless account),
    then check with `kiro-cli whoami`.
 3. **Bun 1.3+** to build the plugin.
@@ -77,9 +81,12 @@ archon workflow cancel <run-id>
 pgrep -fl "sleep 237"                                    # nothing: it died with Kiro
 ```
 
-`--no-worktree` is needed while this repository has no git remote: Archon only creates
-worktrees for a repository with one. With a remote, drop the flag and each run gets its own
-worktree. The feature tour writes `kiro-made.txt` and removes it in its last node.
+With `--no-worktree` a run uses your checkout as it is, including uncommitted changes.
+Without the flag, each run gets its own worktree branched from `origin/main` (tested with
+`kiro-hello`), so it only sees what you have pushed. `kiro-playwright-cli` always needs
+`--no-worktree`: its skill is an untracked file in your checkout, and a worktree doesn't
+include untracked files. The feature tour writes `kiro-made.txt` and removes it in its last
+node.
 
 ## Configuration
 
@@ -251,8 +258,12 @@ from the recorded invalid-model failure by swapping its typed error fields, and 
 
 ## Publishing
 
-Archon installs provider plugins from GitHub releases. Push this repository to GitHub, add
-the `archon-plugin` topic to list it on archon.diy, and push a tag:
+Archon installs provider plugins from GitHub releases, and only from **public**
+repositories: `archon plugin add` reads `archon-plugin.json` from
+`raw.githubusercontent.com` without credentials. While the repository is private, install
+from a clone with `bun run install:local` (see [INSTALL.md](INSTALL.md)). To publish, make
+the repository public, add the `archon-plugin` topic to list it on archon.diy, and push a
+tag:
 
 ```sh
 git tag v0.1.0 && git push origin v0.1.0
@@ -271,6 +282,9 @@ same executable.
 ## Layout
 
 ```
+INSTALL.md                install Archon and this plugin, step by step
+KIRO-LEARNINGS.md         field notes on Kiro CLI
+ARCHON-LEARNINGS.md       field notes on Archon
 archon-plugin.json        provider manifest (executable archon-provider-kiro)
 src/main.ts               plugin entry: serveProvider over stdio
 src/provider.ts           IAgentProvider: turns, credentials, models, diagnostics

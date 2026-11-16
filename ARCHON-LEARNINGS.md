@@ -73,6 +73,11 @@ Every claim carries a tag saying how we know it:
   or use `--no-worktree`". A local bare repository as `origin` is enough. **[Tested]**
 - The base branch comes from `origin/HEAD` or `origin/main`; otherwise set
   `worktree.baseBranch` in `.archon/config.yaml` (0.5.0 only warned). **[Tested]**
+- A private GitHub `origin` works: the run branched `archon/task-<workflow>-<n>` from
+  `origin/main`, ran in the worktree, and removed the worktree afterwards (the branch
+  stays). **[Tested]** Being a git worktree of `origin/main`, it lacks unpushed commits and
+  untracked files, for example a skill installed into `.claude/skills` but never committed;
+  run such workflows with `--no-worktree`. **[Unverified]** for the skill case.
 - A gitignored file reaches a worktree only through `worktree.copyFiles`. **[Docs]**
 - A run with `--no-worktree` writes into your checkout; design sample workflows to clean
   up after themselves. **[Tested]**
@@ -378,6 +383,13 @@ range, checked at install. **[Docs]**
 - **GitHub is the registry.** `archon plugin add owner/repo[/path][@tag]`; without a tag,
   binary plugins use the latest release. Add the `archon-plugin` topic to be listed on
   archon.diy. **[Docs]**
+- **Private repositories cannot be installed with `plugin add`.** Resolution runs
+  `git ls-remote` (your git credentials apply, so that step succeeds) but then fetches
+  `archon-plugin.json` from `raw.githubusercontent.com` unauthenticated, which 404s:
+  "No archon-plugin.json for owner/repo at commit … returned 404". The source says so in
+  `packages/cli/src/commands/plugin.ts`. A private plugin has to be built from a clone and
+  installed locally (this repo's `bun run install:local`). **[Tested]** on 0.14.0 /
+  **[Source]**
 - Release assets: `<executable>-<os>-<arch>` (`.exe` on Windows; `linux|darwin|windows` ×
   `x64|arm64`) plus `checksums.txt`. **[Docs]** Bun cross-compiles all five targets with
   `bun build --compile --target=bun-<os>-<arch>`. **[Tested]**
