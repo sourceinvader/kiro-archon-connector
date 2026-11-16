@@ -4,3 +4,7 @@ dist/
 .e2e/
 coverage/
 .DS_Store
+
+# Playwright output directories (may contain credentials or screenshots)
+.playwright-cli/
+.playwright-mcp/

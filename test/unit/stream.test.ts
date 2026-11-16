@@ -20,7 +20,7 @@ const content = (events: ProviderEvent[]): ProviderEvent[] => events.filter(even
 
 describe('KiroStreamMapper on recorded Kiro streams', () => {
   test('every event of every fixture is a valid provider event', () => {
-    for (const name of ['text', 'tools', 'interrupted', 'bad-model', 'resume-missing', 'structured', 'denied-tool', 'resume-first', 'resume-second', 'throttled']) {
+    for (const name of ['text', 'tools', 'interrupted', 'bad-model', 'resume-missing', 'structured', 'denied-tool', 'resume-first', 'resume-second', 'throttled', 'mcp', 'mcp-startup-failure', 'skill']) {
       for (const event of replay(name).events) expect(providerEventSchema.safeParse(event).success).toBe(true);
     }
   });
@@ -121,6 +121,22 @@ describe('KiroStreamMapper on recorded Kiro streams', () => {
     expect(mapper.summary.runError?.stage).toBe('prompt');
     expect(mapper.errorIdentity(1)).toEqual({ errorType: 'InvalidModelError', retryErrorType: 'CLIENT_ERROR', stage: 'prompt', exitCode: 1 });
     expect(mapper.stopReason()).toBeUndefined(); // Kiro's native "error" has no ACP name.
+  });
+
+  test('MCP turn: the tool-loader update without a start gets one; the MCP call closes with its result', () => {
+    const { events, mapper } = replay('mcp');
+    expect(mapper.summary.turnStarted).toBe(true);
+    const calls = events.filter(event => event.type === 'tool_call');
+    const updates = events.filter(event => event.type === 'tool_call_update');
+    expect(calls.length).toBe(updates.length);
+    expect(calls.some(call => call.type === 'tool_call' && call.title === '@secret/get_secret')).toBe(true);
+    expect(updates.some(update => update.type === 'tool_call_update' && update.output === 'MCP-SECRET-77')).toBe(true);
+  });
+
+  test('MCP startup failure: typed error before the turn starts', () => {
+    const { mapper } = replay('mcp-startup-failure');
+    expect(mapper.summary.turnStarted).toBe(false);
+    expect(mapper.errorIdentity(3)).toMatchObject({ errorType: 'mcp_connection_error', stage: 'init', exitCode: 3 });
   });
 
   test('missing resume session: init-stage error without a session id', () => {

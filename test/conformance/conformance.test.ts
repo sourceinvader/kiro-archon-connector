@@ -10,7 +10,7 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { readFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { Readable, Writable } from 'node:stream';
 import type { IAgentProvider, MessageChunk } from '@archon/provider-contract';
@@ -31,12 +31,17 @@ const BINARY = join(ROOT, 'dist', 'archon-provider-kiro');
 const RESUMABLE = 'sess_abcdefab-0000-4000-8000-00000000c0de';
 
 let fake: FakeKiro;
+let MCP_FILE: string;
 beforeAll(async () => {
   fake = await createFakeKiro();
-  if (!existsSync(BINARY) || process.env.REBUILD === '1') {
-    const build = Bun.spawn([process.execPath, 'scripts/build.ts'], { cwd: ROOT, stdout: 'ignore', stderr: 'inherit' });
-    if ((await build.exited) !== 0) throw new Error('plugin build failed');
-  }
+  MCP_FILE = join(fake.cwd, 'mcp.json');
+  await writeFile(MCP_FILE, JSON.stringify({ secret: { command: 'bun', args: ['server.ts'] } }));
+  const skillDir = join(fake.cwd, '.kiro', 'skills', 'magic-phrase');
+  await mkdir(skillDir, { recursive: true });
+  await writeFile(join(skillDir, 'SKILL.md'), '---\nname: magic-phrase\ndescription: test\n---\nThe magic phrase is GIRAFFE-SKILL-31.\n');
+  // Always rebuild: a stale executable would test yesterday's code.
+  const build = Bun.spawn([process.execPath, 'scripts/build.ts'], { cwd: ROOT, stdout: 'ignore', stderr: 'inherit' });
+  if ((await build.exited) !== 0 || !existsSync(BINARY)) throw new Error('plugin build failed');
 }, 180_000);
 afterAll(() => fake.cleanup());
 
@@ -67,6 +72,8 @@ function suiteFor(target: Target, env: Record<string, string>) {
     },
     { name: 'resume', run: run(target.provider, 'What was the code word?', RESUMABLE) },
     { name: 'restricted-tools', run: run(target.provider, 'fixture:denied-tool', undefined, { nodeConfig: { allowed_tools: ['read'] } }) },
+    { name: 'mcp node', run: run(target.provider, 'fixture:mcp', undefined, { nodeConfig: { mcp: MCP_FILE } }) },
+    { name: 'skill node', run: run(target.provider, 'fixture:skill', undefined, { nodeConfig: { skills: ['magic-phrase'] } }) },
   ];
   const failureCases: ProviderFailureCase[] = [
     { name: 'invalid model', expected: 'misconfigured', evidence: 'InvalidModelError', run: run(target.provider, 'fixture:bad-model') },
@@ -76,6 +83,18 @@ function suiteFor(target: Target, env: Record<string, string>) {
     { name: 'capacity', expected: 'overloaded', evidence: 'capacity', run: run(target.provider, 'fixture:overloaded') },
     { name: 'signed out', expected: 'auth', evidence: 'kiro-cli login', run: run(target.signedOut, 'fixture:text') },
     { name: 'missing session', expected: 'unknown', evidence: 'not found', run: run(target.provider, 'hi', 'sess_00000000-0000-4000-8000-000000000000') },
+    {
+      name: 'mcp server does not start',
+      expected: 'misconfigured',
+      evidence: 'mcp_connection_error',
+      run: run(target.provider, 'fixture:mcp-startup-failure', undefined, { nodeConfig: { mcp: MCP_FILE } }),
+    },
+    {
+      name: 'skill not installed',
+      expected: 'misconfigured',
+      evidence: 'ghost-skill',
+      run: run(target.provider, 'fixture:skill', undefined, { nodeConfig: { skills: ['ghost-skill'] } }),
+    },
   ];
   return {
     capabilities: target.provider.getCapabilities(),

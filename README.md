@@ -51,16 +51,24 @@ cheap `minimax-m2.5` model. Run them from this directory:
 | Workflow | What it shows | Expected result |
 |---|---|---|
 | `kiro-hello` | One Kiro turn, reply printed by a bash node | completes, prints `KIRO-ARCHON-OK` |
-| `kiro-feature-tour` | Plain reply, session recall (`context: shared`), structured output, tool use, `allowed_tools`, `systemPrompt`; each step checked by a bash node | completes; every check node passes |
+| `kiro-feature-tour` | Plain reply, session recall (`context: shared`), structured output, tool use, `allowed_tools`, `systemPrompt`, a per-node MCP server, a per-node skill, and skill exactness; each step checked by a bash node | completes; every check node passes |
+| `kiro-playwright-mcp` | A browser-only node (`mcp: .archon/mcp/playwright.json`, `allowed_tools: []`) opens example.com and returns its title | completes, title `Example Domain` |
+| `kiro-playwright-cli` | A node with `skills: [playwright-cli]` drives the browser through `playwright-cli` shell commands | completes, title `Example Domain` (needs the setup below) |
 | `kiro-repo-summary` | A read-only node (`allowed_tools: [read]`) with `output_format` summarising the repository | completes, prints purpose and language |
 | `kiro-bad-model` | How a configuration error surfaces | **fails** as `misconfigured` with Kiro's `InvalidModelError`, no retry |
 | `kiro-cancel-demo` | Cancelling a running node kills Kiro and its commands | see the steps in the workflow's description |
 
 ```sh
 archon workflow run kiro-hello --no-worktree
-archon workflow run kiro-feature-tour --no-worktree
+archon workflow run kiro-feature-tour --no-worktree      # needs bun on PATH (demo MCP server)
+archon workflow run kiro-playwright-mcp --no-worktree
 archon workflow run kiro-repo-summary --no-worktree
 archon workflow run kiro-bad-model --no-worktree        # expected to fail
+
+# Playwright CLI: one-time setup in this repository, then run
+npm install -g @playwright/cli@latest
+playwright-cli install --skills                          # writes .claude/skills/playwright-cli
+archon workflow run kiro-playwright-cli --no-worktree
 
 archon workflow run kiro-cancel-demo --no-worktree --detach
 pgrep -fl "sleep 237"                                    # Kiro's command is running
@@ -98,6 +106,8 @@ The plugin also honours `KIRO_CLI_PATH` and `KIRO_API_KEY` from the environment.
 |---|---|---|
 | Streaming reply and reasoning | ACP `agent_message_chunk` / `agent_thought_chunk`, coalesced into blocks | — |
 | Tool calls | ACP `tool_call` / `tool_call_update`; every call gets exactly one closing update | — |
+| Per-node MCP servers (`mcp:`) | The file's servers become the node's only MCP servers; `--require-mcp-startup` fails the node as `misconfigured` before any model work if one does not start; each is reported as `mcp_server_status` | `mcp: true` |
+| Per-node skills (`skills:`) | Exactly the named skills, loaded from `.kiro/skills`, `.agents/skills` or `.claude/skills` (project, then home); none when omitted | `skills: true`, `skillDiscovery` |
 | Session resume (`context: shared`, `persist_session`) | `--resume-id`; a session Kiro no longer has is confirmed via `--list-sessions` and reported as `sessionNotFound` | `sessionResume: true` |
 | `model:` | `--model` | — |
 | `effort:` | `--effort`, Archon rungs clamped down to Kiro's five levels | `effortControl: true` |
@@ -111,8 +121,55 @@ The plugin also honours `KIRO_CLI_PATH` and `KIRO_API_KEY` from the environment.
 | Per-turn environment | Archon's request env is passed to `kiro-cli` | `envInjection: true` |
 
 Not supported (declared `false`, so Archon warns or refuses before spending anything):
-per-node MCP servers, skills, hooks, inline sub-agents, Archon native tools, container
-execution, session fork (named `context: { resume: node }`), spend limits, fallback models.
+hooks, inline sub-agents, Archon's chat tools (`invoke_workflow`, `manage_run`; Archon's
+chat falls back to running `archon` commands through the shell), container execution,
+session fork (named `context: { resume: node }`), spend limits, fallback models.
+
+### MCP servers and skills in workflow nodes
+
+Archon's rule is exact selection: a workflow node gets the MCP servers in its `mcp:` file
+and the skills in its `skills:` list, and nothing else of yours. So every workflow node
+runs on an ephemeral Kiro agent (see below) that
+
+- lists only the declared servers in `mcpServers`, and starts them with
+  `--require-mcp-startup`;
+- uses Kiro's built-in tools (`@builtin`) plus `@<server>` for each declared server,
+  instead of `*`. Kiro still starts the servers in your own `~/.kiro/settings/mcp.json` and
+  workspace `.kiro/settings/mcp.json` in the background, but their tools are not available
+  to the node, and one that fails to start does not fail it;
+- turns off powers (`includePowers: false`);
+- denies Kiro's on-demand skill loader (its `skill` capability), which would otherwise load
+  any `.kiro/skills` skill the conversation names, and delivers each declared skill's
+  `SKILL.md` up front instead, with a note giving the skill's directory so its relative
+  references resolve. `AGENTS.md` and always-included steering still load; steering that
+  Kiro would load on demand does not.
+
+MCP config files use Archon's format (`{ "name": { "command", "args", "env" } }`, `type:
+"http"`/`"sse"` with `url` and `headers`, or the `{ "mcpServers": {...} }` wrapper).
+`$VAR` and `${VAR}` in `env` and `headers` values are expanded from the run's environment;
+an undefined one becomes empty and the node gets a `kiro.mcp_env_vars_missing` warning.
+`allowed_tools: []` plus `mcp:` makes an MCP-only node. A missing or malformed file, or a
+skill that is not installed, fails the node as `misconfigured` before Kiro starts, and
+`archon validate workflows` reports a missing skill with the folders it searched.
+
+Archon's chat (no workflow node) keeps Kiro's native behaviour: your default agent, your
+MCP servers and your skills.
+
+### Playwright
+
+Both routes are tested end to end:
+
+- **MCP server**: `.archon/mcp/playwright.json` runs `npx -y @playwright/mcp@0.0.85
+  --headless --isolated`. Kiro waits at most 30 seconds for a server to start, so if the
+  first run times out while npx downloads the package, run
+  `npx -y @playwright/mcp@0.0.85 --help` once and retry.
+- **CLI with its skill**: `npm install -g @playwright/cli@latest`, then
+  `playwright-cli install --skills` in the repository, and give the node
+  `skills: [playwright-cli]`. The skill teaches Kiro the CLI; Kiro runs it with its shell
+  tool, so do not deny `shell` on that node. Playwright's CLI authors recommend this route
+  for coding agents because it costs fewer tokens than MCP tool schemas and page snapshots.
+
+Both use your installed Google Chrome (or Playwright's Chromium) and need network access.
 
 ### Tools and approval
 
@@ -128,19 +185,19 @@ node with no tools at all.
 
 ### How restrictions and system prompts reach Kiro
 
-Kiro has no flag for a system prompt or a tool list, and `--agent` accepts only a name.
-For a node that needs one, the plugin writes an ephemeral agent
-`archon-run-<random>.json` into Kiro's global agent directory (`$KIRO_HOME/agents`, else
-`~/.kiro/agents`), passes `--agent archon-run-…`, and deletes the file when the turn ends,
-whether it succeeds, fails or is cancelled. Leftovers from a crash are swept after six hours.
-The workspace's `.kiro/agents` is never written, so nothing appears in the run's diff.
+Kiro has no flag for a system prompt, a tool list, per-run MCP servers or skills, and
+`--agent` accepts only a name. So every workflow node (and a chat turn with a system prompt)
+runs on an ephemeral agent `archon-run-<random>.json` written into Kiro's global agent
+directory (`$KIRO_HOME/agents`, else `~/.kiro/agents`), passed as `--agent archon-run-…`,
+and deleted when the turn ends, whether it succeeds, fails or is cancelled. Leftovers from a
+crash are swept after six hours. The workspace's `.kiro/agents` is never written, so nothing
+appears in the run's diff.
 
-From scratch, the ephemeral agent mirrors Kiro's default agent (all tools, your `mcp.json`
-servers and powers); project guidance such as `AGENTS.md` and `.kiro/steering` still loads.
 With `assistants.kiro.agent` set, the plugin copies that agent's JSON definition
-(workspace `.kiro/agents/` first, then global) and applies the node on top. A Markdown-only
-or built-in agent other than `kiro_default` cannot be combined with restrictions; the node
-fails as `misconfigured` before Kiro starts.
+(workspace `.kiro/agents/` first, then global) and applies the node on top; in a workflow
+node the agent's own MCP servers and `skill://` resources are replaced by the node's. A
+Markdown-only agent, or a built-in agent other than `kiro_default`, cannot be copied, so
+workflow nodes fail as `misconfigured` before Kiro starts.
 
 ### Authentication
 
@@ -162,22 +219,29 @@ bun run test:live      # real Kiro, spends credits (KIRO_LIVE_MODEL, default min
 ARCHON_BIN=/path/to/archon bun run e2e   # real Archon + real Kiro, the sample workflows
 ```
 
-- **Unit** (`test/unit`, 103 tests): the stream mapper on recorded Kiro streams, failure
-  classification, config schemas, the ephemeral agent, structured-output parsing, and the
-  provider driving a fake `kiro-cli`. The fake replays recorded streams through the real
-  process, stdin, line and exit-code paths, including a hang scenario with a real
-  grandchild process to prove that cancellation kills the whole group.
+- **Unit** (`test/unit`, 138 tests): the stream mapper on recorded Kiro streams, failure
+  classification, config schemas, MCP config loading and translation, skill resolution, the
+  ephemeral agent and workflow isolation, structured-output parsing, and the provider
+  driving a fake `kiro-cli`. The fake replays recorded streams through the real process,
+  stdin, line and exit-code paths, including a hang scenario with a real grandchild process
+  to prove that cancellation kills the whole group.
 - **Conformance** (`test/conformance`, 13 tests): Archon's own `runProviderConformance` and
   `checkCredentialStatuses` against the provider in process, as a plugin process over stdio,
-  and as the compiled executable, plus the handshake and RPC diagnostics.
-- **Live** (`test/live`, 12 tests): plain reply, tools, resume, missing session,
+  and as the compiled executable (rebuilt each run), including MCP and skill turns and their
+  failure cases, plus the handshake and RPC diagnostics.
+- **Live** (`test/live`, 20 tests): plain reply, tools, resume, missing session,
   `allowed_tools` and `denied_tools` actually enforced, system prompt, structured output,
   effort, an unknown model, mid-tool cancellation (the command is seen running, then gone),
-  and credential, model and diagnostic checks.
-- **End to end** (`e2e/run.ts`, 30 checks): builds and installs the plugin into an isolated
+  credential, model and diagnostic checks; an MCP tool really called, an MCP startup
+  failure, the workspace's own MCP servers excluded, an MCP-only node, a declared skill
+  used, an undeclared `.kiro` skill unloadable even by name, and Playwright through both MCP
+  and the CLI skill. The isolation tests each run a control turn without isolation that
+  must see the ambient server or skill, so they cannot pass vacuously.
+- **End to end** (`e2e/run.ts`, 38 checks): builds and installs the plugin into an isolated
   `ARCHON_HOME`, then has the real Archon CLI list it, run `doctor`, validate every sample
-  workflow, run `kiro-hello` and `kiro-feature-tour` (in a worktree), run `kiro-bad-model`,
-  and cancel `kiro-cancel-demo` mid-command.
+  workflow, run `kiro-hello`, `kiro-feature-tour` (in a worktree), `kiro-playwright-mcp`
+  and `kiro-playwright-cli`, run `kiro-bad-model`, and cancel `kiro-cancel-demo`
+  mid-command. Passes on Archon 0.13.2 and 0.14.0.
 
 Test fixtures in `test/fixtures` are real Kiro streams recorded with
 `bun scripts/record-fixtures.ts` (paths replaced by `{{CWD}}`/`{{HOME}}`). Throttling,
@@ -212,7 +276,9 @@ src/main.ts               plugin entry: serveProvider over stdio
 src/provider.ts           IAgentProvider: turns, credentials, models, diagnostics
 src/stream.ts             Kiro stream-json → Archon provider events
 src/failure.ts            Kiro error identity → failure class
-src/agent-file.ts         ephemeral Kiro agents for restrictions and system prompts
+src/agent-file.ts         ephemeral Kiro agents: restrictions, prompts, workflow isolation
+src/mcp-config.ts         a node's mcp: file → Kiro mcpServers (Archon's format and expansion)
+src/skills.ts             a node's skills: names → SKILL.md files in the declared roots
 src/process.ts            one kiro-cli process per turn, process-group cancellation
 src/kiro-cli.ts           whoami, --list-models, --list-sessions, --version
 src/structured-output.ts  best-effort JSON (adapted from Archon, MIT)
@@ -220,6 +286,8 @@ src/config.ts             assistants.kiro schemas (install / run / snapshot)
 src/descriptor.ts         descriptor and capabilities
 vendor/provider-contract  Archon's provider contract v0.14.0, vendored (not on npm yet)
 .archon/workflows/        sample workflows
+.archon/mcp/              MCP configs the samples use (Playwright, demo secret server)
+.kiro/skills/             demo skill used by kiro-feature-tour
 scripts/                  build, local install, fixture recording
 e2e/                      real-Archon end-to-end driver
 test/                     unit, conformance and live suites, fixtures, fake kiro-cli

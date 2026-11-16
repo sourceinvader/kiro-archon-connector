@@ -231,7 +231,8 @@ describe('tool restrictions and prompts through an ephemeral agent', () => {
     await writeFile(join(fake.cwd, '.kiro', 'agents', 'reviewer.json'), JSON.stringify({ name: 'reviewer', prompt: 'Review.', tools: ['*'] }));
     await turn('fixture:text', { assistantConfig: { agent: 'reviewer' }, nodeConfig: { denied_tools: ['write'] } });
     const [call] = await fake.invocations();
-    expect(call?.agentFile).toMatchObject({ prompt: 'Review.', tools: ['*'], excludedTools: ['write'] });
+    // In a workflow node '*' narrows to Kiro's built-in tools; see workflowTools.
+    expect(call?.agentFile).toMatchObject({ prompt: 'Review.', tools: ['@builtin'], excludedTools: ['write'] });
   });
 
   test('a configured agent Kiro cannot find fails as misconfigured (exit 4)', async () => {
@@ -248,6 +249,115 @@ describe('tool restrictions and prompts through an ephemeral agent', () => {
   test('the agent file is removed even when the turn fails', async () => {
     await turn('fixture:bad-model', { nodeConfig: { denied_tools: ['shell'] } });
     expect((await readdir(agentsDir())).filter(name => name.startsWith('archon-run-'))).toEqual([]);
+  });
+});
+
+describe('workflow nodes: exact MCP servers and skills', () => {
+  const writeMcp = async (config: unknown): Promise<string> => {
+    const path = join(fake.cwd, '.archon', 'mcp', 'servers.json');
+    await mkdir(join(fake.cwd, '.archon', 'mcp'), { recursive: true });
+    await writeFile(path, JSON.stringify(config));
+    return path;
+  };
+  const writeSkill = async (root: string, name: string): Promise<string> => {
+    const dir = join(fake.cwd, root, name);
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, 'SKILL.md'), `---\nname: ${name}\ndescription: test skill\n---\nDo the thing.\n`);
+    return dir;
+  };
+
+  test('a node without declarations still runs isolated: no ambient MCP, skill loader denied', async () => {
+    const chunks = await turn('fixture:text', { nodeConfig: {} });
+    expectSettledTurn(chunks);
+    const [call] = await fake.invocations();
+    expect(call?.args).toContain('--agent');
+    expect(call?.args).not.toContain('--require-mcp-startup');
+    expect(call?.agentFile).toMatchObject({
+      includeMcpJson: false,
+      includePowers: false,
+      mcpServers: {},
+      permissions: { rules: [{ capability: 'skill', effect: 'deny' }] },
+    });
+    expect(chunks.some(chunk => chunk.type === 'mcp_server_status')).toBe(false);
+  });
+
+  test('mcp: servers reach Kiro, startup is required, each server is reported connected', async () => {
+    const path = await writeMcp({ secret: { command: 'bun', args: ['server.ts'], env: { TOKEN: '$SECRET_TOKEN' } } });
+    const chunks = await turn('fixture:mcp', { nodeConfig: { mcp: path } }, undefined, { SECRET_TOKEN: 's3' });
+    expectSettledTurn(chunks);
+    const [call] = await fake.invocations();
+    expect(call?.args).toContain('--require-mcp-startup');
+    expect(call?.agentFile).toMatchObject({ mcpServers: { secret: { command: 'bun', args: ['server.ts'], env: { TOKEN: 's3' } } } });
+    const status = chunks.filter(chunk => chunk.type === 'mcp_server_status');
+    expect(status).toEqual([{ type: 'mcp_server_status', server: 'secret', status: 'connected' }]);
+    expect(chunks.indexOf(status[0]!)).toBeLessThan(chunks.findIndex(chunk => chunk.type === 'tool_call'));
+    expect(resultOf(chunks).text).toContain('MCP-SECRET-77');
+  });
+
+  test('allowed_tools: [] plus mcp: makes an MCP-only node', async () => {
+    const path = await writeMcp({ secret: { command: 'bun' } });
+    await turn('fixture:mcp', { nodeConfig: { mcp: path, allowed_tools: [] } });
+    expect((await fake.invocations())[0]?.agentFile).toMatchObject({ tools: ['@secret'] });
+  });
+
+  test('a server that does not start fails the node as misconfigured, not connected', async () => {
+    const path = await writeMcp({ secret: { command: 'bun' } });
+    const chunks = await turn('fixture:mcp-startup-failure', { nodeConfig: { mcp: path } });
+    expectSettledTurn(chunks);
+    expect(resultOf(chunks).failure).toMatchObject({ class: 'misconfigured', evidence: expect.stringContaining('failed to start') });
+    expect(chunks.some(chunk => chunk.type === 'mcp_server_status')).toBe(false);
+  });
+
+  test('a missing or malformed mcp file fails before Kiro starts', async () => {
+    const missing = resultOf(await turn('fixture:text', { nodeConfig: { mcp: join(fake.cwd, 'nope.json') } }));
+    expect(missing.failure).toMatchObject({ class: 'misconfigured', evidence: expect.stringContaining('not found') });
+    const malformed = resultOf(await turn('fixture:text', { nodeConfig: { mcp: await writeMcp({ s: { type: 'http' } }) } }));
+    expect(malformed.failure).toMatchObject({ class: 'misconfigured', evidence: expect.stringContaining('url') });
+    expect(await fake.invocations()).toEqual([]);
+  });
+
+  test('undefined env vars in the mcp file become a warning', async () => {
+    const path = await writeMcp({ secret: { command: 'bun', env: { TOKEN: '$DEFINITELY_UNSET_VAR_X' } } });
+    const chunks = await turn('fixture:mcp', { nodeConfig: { mcp: path } });
+    expect(chunks).toContainEqual(expect.objectContaining({ type: 'warning', code: 'kiro.mcp_env_vars_missing', message: expect.stringContaining('DEFINITELY_UNSET_VAR_X') }));
+  });
+
+  test('skills: exactly the named skills, as file resources with their directories', async () => {
+    const pw = await writeSkill('.claude/skills', 'playwright-cli');
+    const own = await writeSkill('.kiro/skills', 'house-style');
+    await writeSkill('.kiro/skills', 'not-declared');
+    const chunks = await turn('fixture:skill', { nodeConfig: { skills: ['playwright-cli', 'house-style'] } });
+    expectSettledTurn(chunks);
+    const agentFile = (await fake.invocations())[0]?.agentFile as { resources: string[]; prompt: string };
+    expect(agentFile.resources).toEqual([`file://${join(pw, 'SKILL.md')}`, `file://${join(own, 'SKILL.md')}`]);
+    expect(agentFile.prompt).toContain(`- playwright-cli: ${pw}`);
+    expect(JSON.stringify(agentFile)).not.toContain('not-declared');
+  });
+
+  test('a skill that is not installed fails before Kiro starts, naming the roots', async () => {
+    const result = resultOf(await turn('fixture:skill', { nodeConfig: { skills: ['ghost-skill'] } }));
+    // Read before toMatchObject: Bun's asymmetric matchers write into the received object.
+    const evidence = result.failure?.evidence ?? '';
+    expect(result.failure?.class).toBe('misconfigured');
+    expect(evidence).toContain('ghost-skill');
+    expect(evidence).toContain('.kiro/skills');
+    expect(evidence).toContain('.claude/skills');
+    expect(await fake.invocations()).toEqual([]);
+  });
+
+  test('skills and mcp together', async () => {
+    await writeSkill('.agents/skills', 'pr-conventions');
+    const path = await writeMcp({ github: { type: 'http', url: 'https://mcp.example/github' } });
+    await turn('fixture:mcp', { nodeConfig: { skills: ['pr-conventions'], mcp: path } });
+    expect((await fake.invocations())[0]?.agentFile).toMatchObject({
+      mcpServers: { github: { url: 'https://mcp.example/github' } },
+      resources: [expect.stringMatching(/pr-conventions\/SKILL\.md$/)],
+    });
+  });
+
+  test('the chat path (no nodeConfig) keeps Kiro native: no agent, no isolation', async () => {
+    await turn('fixture:text');
+    expect((await fake.invocations())[0]?.args).not.toContain('--agent');
   });
 });
 

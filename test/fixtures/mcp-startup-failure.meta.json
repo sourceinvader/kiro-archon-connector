@@ -1,0 +1,10 @@
+{
+  "exitCode": 3,
+  "signal": null,
+  "model": "minimax-m2.5",
+  "recordedAt": "2026-11-16T09:04:47.575Z",
+  "mcpServers": [
+    "secret"
+  ],
+  "note": "the server exits before initialize"
+}

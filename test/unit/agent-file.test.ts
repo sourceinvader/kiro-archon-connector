@@ -12,6 +12,7 @@ import {
   needsEphemeralAgent,
   STALE_AGENT_MS,
   sweepStaleAgents,
+  workflowTools,
 } from '../../src/agent-file';
 
 let root: string;
@@ -115,6 +116,83 @@ describe('buildAgentConfig', () => {
     for (const baseAgent of ['kiro_planner', 'missing', 'broken', 'md-only', '../escape']) {
       await expect(buildAgentConfig('n', { baseAgent, allowedTools: [] }, cwd, globalDir)).rejects.toBeInstanceOf(AgentConfigError);
     }
+  });
+});
+
+describe('workflow isolation', () => {
+  const skill = { name: 'pw', dir: '/s/pw', file: '/s/pw/SKILL.md' };
+  const secret = { secret: { command: 'bun', args: ['server.ts'] } };
+
+  test('a workflow node always gets an agent', () => {
+    expect(needsEphemeralAgent({ workflow: { mcpServers: {}, skills: [] } })).toBe(true);
+  });
+
+  test('no declarations: no ambient MCP, no powers, Kiro skill loader denied, no resources', async () => {
+    const config = await buildAgentConfig('n', { workflow: { mcpServers: {}, skills: [] } }, cwd, globalDir);
+    expect(config).toMatchObject({
+      // Not '*': that would also match the tools of the user's own mcp.json servers.
+      tools: ['@builtin'],
+      includeMcpJson: false,
+      includePowers: false,
+      mcpServers: {},
+      permissions: { rules: [{ capability: 'skill', effect: 'deny' }] },
+    });
+    expect(config.resources).toBeUndefined();
+    expect(config.prompt).toBeUndefined();
+  });
+
+  test('declared servers and skills, with a note naming each skill directory', async () => {
+    const config = await buildAgentConfig('n', { workflow: { mcpServers: secret, skills: [skill] } }, cwd, globalDir);
+    expect(config.mcpServers).toEqual(secret);
+    expect(config.resources).toEqual(['file:///s/pw/SKILL.md']);
+    expect(config.prompt).toContain('- pw: /s/pw');
+    expect(config.tools).toEqual(['@builtin', '@secret']);
+  });
+
+  test('workflowTools: * → @builtin, undeclared servers dropped, declared ones added', () => {
+    expect(workflowTools(['*'], [])).toEqual(['@builtin']);
+    expect(workflowTools(['read', '@ambient', '@ambient/tool', '@secret/get_secret', '@builtin'], ['secret'])).toEqual([
+      'read',
+      '@secret/get_secret',
+      '@builtin',
+      '@secret',
+    ]);
+    expect(workflowTools([], ['a', 'b'])).toEqual(['@a', '@b']);
+  });
+
+  test('allowed_tools keeps declared MCP servers usable', async () => {
+    const config = await buildAgentConfig('n', { allowedTools: [], workflow: { mcpServers: secret, skills: [] } }, cwd, globalDir);
+    expect(config.tools).toEqual(['@secret']);
+    const withRead = await buildAgentConfig('n', { allowedTools: ['read'], workflow: { mcpServers: secret, skills: [] } }, cwd, globalDir);
+    expect(withRead.tools).toEqual(['read', '@secret']);
+  });
+
+  test('system prompts and the skills note compose', async () => {
+    const config = await buildAgentConfig('n', { systemPrompt: 'Be brief.', appendSystemPrompt: 'Extra.', workflow: { mcpServers: {}, skills: [skill] } }, cwd, globalDir);
+    expect((config.prompt as string).split('\n\n').slice(0, 2)).toEqual(['Be brief.', 'Extra.']);
+    expect(config.prompt).toContain('- pw: /s/pw');
+  });
+
+  test('a base agent loses its own MCP servers and skills, keeps the rest', async () => {
+    await writeFile(
+      join(globalDir, 'mine.json'),
+      JSON.stringify({
+        name: 'mine',
+        tools: ['read', 'shell'],
+        includeMcpJson: true,
+        mcpServers: { theirs: { command: 'x' } },
+        resources: ['file://README.md', 'skill://.kiro/skills/*/SKILL.md'],
+        permissions: { rules: [{ capability: 'shell', effect: 'ask' }], mode: 'strict' },
+      })
+    );
+    const config = await buildAgentConfig('n', { baseAgent: 'mine', workflow: { mcpServers: secret, skills: [skill] } }, cwd, globalDir);
+    expect(config).toMatchObject({
+      tools: ['read', 'shell', '@secret'],
+      includeMcpJson: false,
+      mcpServers: secret,
+      resources: ['file://README.md', 'file:///s/pw/SKILL.md'],
+      permissions: { mode: 'strict', rules: [{ capability: 'shell', effect: 'ask' }, { capability: 'skill', effect: 'deny' }] },
+    });
   });
 });
 

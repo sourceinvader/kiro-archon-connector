@@ -1,0 +1,33 @@
+name: kiro-playwright-cli
+description: |
+  Use when: driving a real browser from a Kiro node with Playwright CLI and its skill.
+  Does: a node with `skills: [playwright-cli]` runs playwright-cli commands through its
+  shell tool to open a page and return its title; a bash node checks it.
+  Needs (once, in this repository):
+    npm install -g @playwright/cli@latest     # puts playwright-cli on PATH
+    playwright-cli install --skills           # writes .claude/skills/playwright-cli
+  plus network access and Google Chrome (or Playwright's Chromium).
+  Cost: one turn on minimax-m2.5 (0.25x credit rate), several shell commands.
+
+provider: kiro
+model: minimax-m2.5
+
+nodes:
+  - id: browse
+    skills: [playwright-cli]
+    prompt: |
+      Use playwright-cli to open https://example.com and read the page title.
+      Close the browser when you are done.
+    output_format:
+      type: object
+      properties:
+        title:
+          type: string
+      required: [title]
+      additionalProperties: false
+
+  - id: check-title
+    depends_on: [browse]
+    bash: |
+      title=$browse.output.title
+      case "$title" in *"Example Domain"*) echo "PLAYWRIGHT-CLI-PASS: $title" ;; *) echo "PLAYWRIGHT-CLI-FAIL: $title"; exit 1 ;; esac

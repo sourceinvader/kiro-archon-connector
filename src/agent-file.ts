@@ -2,6 +2,8 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, readdir, readFile, stat, unlink, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
+import type { KiroMcpServer } from './mcp-config';
+import type { ResolvedSkill } from './skills';
 
 /**
  * Kiro has no flag for a system prompt or a tool allow/deny list, and `--agent` takes only
@@ -35,7 +37,25 @@ export interface EphemeralAgentSpec {
   systemPrompt?: string;
   /** Added after the base agent's prompt. */
   appendSystemPrompt?: string;
+  /** Set for a workflow node: exactly its MCP servers and skills, nothing ambient. */
+  workflow?: WorkflowIsolation;
 }
+
+/**
+ * What a workflow node may load. Archon requires exact selection: the node gets the MCP
+ * servers of its `mcp:` file and the skills of its `skills:` list, and none of the user's
+ * own. Kiro would otherwise add the user's `mcp.json` servers and powers, and its
+ * `disclose_context` tool would load any `.kiro/skills` skill named in the conversation,
+ * whatever the agent's resources say. Denying the `skill` capability closes that loader;
+ * declared skills are delivered as `file://` resources instead, which Kiro loads up front.
+ */
+export interface WorkflowIsolation {
+  mcpServers: Record<string, KiroMcpServer>;
+  skills: readonly ResolvedSkill[];
+}
+
+/** Kiro's capability for its skill loader (`disclose_context`). */
+export const SKILL_LOADER_DENY_RULE = { capability: 'skill', effect: 'deny' } as const;
 
 export interface EphemeralAgent {
   name: string;
@@ -45,6 +65,7 @@ export interface EphemeralAgent {
 
 export function needsEphemeralAgent(spec: EphemeralAgentSpec): boolean {
   return (
+    spec.workflow !== undefined ||
     spec.allowedTools !== undefined ||
     (spec.deniedTools !== undefined && spec.deniedTools.length > 0) ||
     Boolean(spec.systemPrompt) ||
@@ -109,17 +130,74 @@ export async function buildAgentConfig(
     config.excludedTools = [...new Set([...existing, ...spec.deniedTools])];
   }
 
+  if (spec.workflow) isolateWorkflowNode(config, spec.workflow);
+
   const basePrompt = base ? await resolvePrompt(base.config.prompt, base.dir) : undefined;
-  const prompt = spec.systemPrompt
-    ? joinPrompts(spec.systemPrompt, spec.appendSystemPrompt)
-    : joinPrompts(basePrompt, spec.appendSystemPrompt);
+  const prompt = joinPrompts(
+    spec.systemPrompt ?? basePrompt,
+    spec.appendSystemPrompt,
+    spec.workflow ? skillsNote(spec.workflow.skills) : undefined
+  );
   if (prompt) config.prompt = prompt;
   else delete config.prompt;
   return config;
 }
 
+/**
+ * A workflow node's tool list. Kiro starts the workspace and global `mcp.json` servers
+ * whatever the agent says, and `includeMcpJson: false` only stops their tools being added on
+ * top of `tools`, so `*` would still match them. `*` therefore becomes `@builtin`, a
+ * reference to an undeclared server is dropped, and each declared server is added, as
+ * Claude adds `mcp__<server>__*`. `allowed_tools: []` plus `mcp:` makes an MCP-only node.
+ */
+export function workflowTools(tools: readonly string[], declaredServers: readonly string[]): string[] {
+  const declared = new Set(declaredServers);
+  const kept = tools.flatMap(tool => {
+    if (tool === '*') return ['@builtin'];
+    if (tool === '@builtin' || !tool.startsWith('@')) return [tool];
+    return declared.has(tool.slice(1).split('/')[0] ?? '') ? [tool] : [];
+  });
+  return [...new Set([...kept, ...declaredServers.map(server => `@${server}`)])];
+}
+
+function isolateWorkflowNode(config: Record<string, unknown>, workflow: WorkflowIsolation): void {
+  const serverNames = Object.keys(workflow.mcpServers);
+  config.includeMcpJson = false;
+  config.includePowers = false;
+  config.mcpServers = { ...workflow.mcpServers };
+  // Kiro accepts `tools: "*"` as well as a list; either way unset means every tool.
+  const tools = Array.isArray(config.tools) ? (config.tools as unknown[]).filter(isString) : ['*'];
+  config.tools = workflowTools(tools, serverNames);
+  // A base agent's own skills are dropped with the rest of its ambient skill access.
+  const resources = [
+    ...(Array.isArray(config.resources)
+      ? (config.resources as unknown[]).filter(resource => !(isString(resource) && resource.startsWith('skill://')))
+      : []),
+    ...workflow.skills.map(skill => `file://${skill.file}`),
+  ];
+  if (resources.length > 0) config.resources = resources;
+  else delete config.resources;
+  const permissions = isRecord(config.permissions) ? config.permissions : {};
+  const rules = Array.isArray(permissions.rules) ? permissions.rules : [];
+  config.permissions = { ...permissions, rules: [...rules, { ...SKILL_LOADER_DENY_RULE }] };
+}
+
+/** Tells the model which skills it has and where their relative paths resolve. */
+function skillsNote(skills: readonly ResolvedSkill[]): string | undefined {
+  if (skills.length === 0) return undefined;
+  return [
+    'Skills selected for this task. Each skill\'s SKILL.md is loaded in your context; follow it when it applies.',
+    'Resolve relative paths in a SKILL.md (references, scripts, assets) against that skill\'s directory:',
+    ...skills.map(skill => `- ${skill.name}: ${skill.dir}`),
+  ].join('\n');
+}
+
 function isString(value: unknown): value is string {
   return typeof value === 'string';
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
 function joinPrompts(...parts: (string | undefined)[]): string | undefined {
@@ -134,7 +212,7 @@ async function loadBaseAgent(
 ): Promise<{ config: Record<string, unknown>; dir: string }> {
   if (BUILT_IN_AGENTS.has(agent)) {
     throw new AgentConfigError(
-      `Kiro built-in agent '${agent}' cannot be combined with allowed_tools, denied_tools or a system prompt; use a JSON agent in .kiro/agents or ~/.kiro/agents`
+      `Kiro built-in agent '${agent}' cannot run workflow nodes or take allowed_tools, denied_tools or a system prompt; use a JSON agent in .kiro/agents or ~/.kiro/agents`
     );
   }
   if (!/^[\w.-]+$/.test(agent)) throw new AgentConfigError(`Kiro agent name '${agent}' is not a plain agent name`);
@@ -160,7 +238,7 @@ async function loadBaseAgent(
   }
   throw new AgentConfigError(
     `Kiro agent '${agent}' has no JSON definition in ${join(cwd, '.kiro', 'agents')} or ${globalDir}; ` +
-      'allowed_tools, denied_tools and system prompts need a JSON agent to build on (Markdown agents are not supported)'
+      'workflow nodes, allowed_tools, denied_tools and system prompts need a JSON agent to build on (Markdown agents are not supported)'
   );
 }
 

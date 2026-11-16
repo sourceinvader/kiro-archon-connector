@@ -50,6 +50,8 @@ const MISCONFIGURED = new Set([
   'InvalidModelError',
   'ProxyAuthenticationRequiredError',
   'ModelRoutingConfigParseError',
+  // A declared MCP server failed to start (with --require-mcp-startup, before any model work).
+  'mcp_connection_error',
 ]);
 const TRANSIENT = new Set(['ConnectionResetError', 'ModelRefreshTimeoutError']);
 
@@ -72,6 +74,8 @@ const RETRY_CATEGORY: Record<string, ProviderFailureClass> = {
 
 /** Documented `kiro-cli chat` exit code: the requested agent is unavailable. */
 export const EXIT_AGENT_UNAVAILABLE = 4;
+/** Documented exit code with `--require-mcp-startup`: an MCP server did not start. */
+export const EXIT_MCP_STARTUP_FAILED = 3;
 
 export function classifyKiroFailure(error: KiroErrorIdentity): ProviderFailureClass {
   const type = error.errorType;
@@ -86,6 +90,7 @@ export function classifyKiroFailure(error: KiroErrorIdentity): ProviderFailureCl
   const category = error.retryErrorType !== undefined ? RETRY_CATEGORY[error.retryErrorType] : undefined;
   if (category) return category;
   if (error.stage === 'init' && error.exitCode === EXIT_AGENT_UNAVAILABLE) return 'misconfigured';
+  if (error.stage === 'init' && error.exitCode === EXIT_MCP_STARTUP_FAILED) return 'misconfigured';
   // A signal from outside this plugin ended the run (our own cancellation never reports).
   if (error.stage === 'interrupted') return 'transient';
   return 'unknown';

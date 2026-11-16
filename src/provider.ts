@@ -23,7 +23,9 @@ import { kiroEffort, readAssistantConfig, type KiroEffort } from './config';
 import { KIRO_CAPABILITIES, PROVIDER_ID } from './descriptor';
 import { classifyKiroFailure } from './failure';
 import { kiroSessionExists, listKiroModels, readKiroVersion, readLoginState } from './kiro-cli';
+import { loadNodeMcp, McpConfigError, nodeMcpPath } from './mcp-config';
 import { runKiroProcess } from './process';
+import { nodeSkillNames, resolveNodeSkills, type ResolvedSkill } from './skills';
 import { KiroStreamMapper } from './stream';
 import { augmentPromptForJsonSchema, tryParseStructuredOutput } from './structured-output';
 
@@ -34,6 +36,12 @@ export interface TurnSettings {
   effort?: KiroEffort;
   trustAllTools: boolean;
   agentSpec: EphemeralAgentSpec;
+  /** A workflow node (the request carries `nodeConfig`): loads exactly its MCP servers and skills. */
+  workflow: boolean;
+  /** The node's `mcp:` file, as the engine resolved it. */
+  mcpPath?: string;
+  /** The node's `skills:` names. */
+  skillNames?: string[];
 }
 
 type Env = Record<string, string>;
@@ -67,7 +75,12 @@ export function resolveTurnSettings(options: SendQueryOptions, env: Env): TurnSe
   const deniedTools = stringList(node?.denied_tools);
   const systemPrompt = promptText(options.systemPrompt) ?? promptText(node?.systemPrompt);
   const appendSystemPrompt = options.appendSystemPrompt?.trim() ? options.appendSystemPrompt : undefined;
+  const mcpPath = nodeMcpPath(node?.mcp);
+  const skillNames = nodeSkillNames(node?.skills);
   return {
+    workflow: node !== undefined,
+    ...(mcpPath ? { mcpPath } : {}),
+    ...(skillNames ? { skillNames } : {}),
     bin: config.kiroPath ?? (env.KIRO_CLI_PATH?.trim() || 'kiro-cli'),
     ...(model ? { model } : {}),
     ...(config.agent ? { agent: config.agent } : {}),
@@ -90,6 +103,8 @@ export function buildChatArgs(settings: {
   effort?: KiroEffort;
   trustAllTools: boolean;
   resumeSessionId?: string;
+  /** Wait for every MCP server before the instruction; exit 3 if one fails. */
+  requireMcpStartup?: boolean;
 }): string[] {
   const args = ['chat', '--v3', '--no-interactive', '--output-format', 'stream-json'];
   if (settings.resumeSessionId) args.push('--resume-id', settings.resumeSessionId);
@@ -97,6 +112,7 @@ export function buildChatArgs(settings: {
   if (settings.agent) args.push('--agent', settings.agent);
   if (settings.effort) args.push('--effort', settings.effort);
   if (settings.trustAllTools) args.push('--trust-all-tools');
+  if (settings.requireMcpStartup) args.push('--require-mcp-startup');
   return args;
 }
 
@@ -157,10 +173,50 @@ export class KiroProvider implements IAgentProvider {
       }
     }
 
+    // A workflow node gets exactly its declared MCP servers and skills; resolve both before
+    // anything starts, so a bad declaration fails before spend.
+    let agentSpec = settings.agentSpec;
+    let mcpServerNames: string[] = [];
+    if (settings.workflow) {
+      let mcpServers = {};
+      if (settings.mcpPath) {
+        try {
+          const loaded = await loadNodeMcp(settings.mcpPath, cwd, env);
+          mcpServers = loaded.servers;
+          mcpServerNames = loaded.names;
+          if (loaded.missingVars.length > 0) {
+            yield {
+              type: 'warning',
+              code: 'kiro.mcp_env_vars_missing',
+              message: `MCP config references undefined env vars: ${loaded.missingVars.join(', ')}. They are empty strings, so the servers may fail to authenticate.`,
+            };
+          }
+        } catch (error) {
+          if (!(error instanceof McpConfigError)) throw error;
+          yield* this.failTurn('misconfigured', error.message);
+          return;
+        }
+      }
+      let skills: ResolvedSkill[] = [];
+      if (settings.skillNames && settings.skillNames.length > 0) {
+        const resolution = resolveNodeSkills(settings.skillNames, cwd, env);
+        if (resolution.missing.length > 0) {
+          yield* this.failTurn(
+            'misconfigured',
+            `Skill${resolution.missing.length > 1 ? 's' : ''} not found: ${resolution.missing.join(', ')}. ` +
+              `Expected <name>/SKILL.md under one of: ${resolution.roots.join(', ')}`
+          );
+          return;
+        }
+        skills = resolution.skills;
+      }
+      agentSpec = { ...agentSpec, workflow: { mcpServers, skills } };
+    }
+
     let agent: EphemeralAgent | undefined;
-    if (needsEphemeralAgent(settings.agentSpec)) {
+    if (needsEphemeralAgent(agentSpec)) {
       try {
-        agent = await createEphemeralAgent(settings.agentSpec, { cwd, env });
+        agent = await createEphemeralAgent(agentSpec, { cwd, env });
       } catch (error) {
         if (!(error instanceof AgentConfigError)) throw error;
         yield* this.failTurn('misconfigured', error.message);
@@ -176,13 +232,23 @@ export class KiroProvider implements IAgentProvider {
         ...settings,
         ...(agent ? { agent: agent.name } : {}),
         ...(resumeSessionId ? { resumeSessionId } : {}),
+        requireMcpStartup: mcpServerNames.length > 0,
       });
       const mapper = new KiroStreamMapper();
       let exit: { code: number | null; signal: NodeJS.Signals | null } | undefined;
       let spawnError: { code: string | undefined; bin: string } | undefined;
+      // With --require-mcp-startup, Kiro starts the turn only after every server started.
+      let mcpAnnounced = mcpServerNames.length === 0;
+      const announceMcp = function* (): Generator<MessageChunk> {
+        mcpAnnounced = true;
+        for (const server of mcpServerNames) yield { type: 'mcp_server_status', server, status: 'connected' };
+      };
       for await (const item of runKiroProcess({ bin: settings.bin, args, cwd, env, input, signal })) {
-        if (item.kind === 'line') yield* mapper.push(item.value);
-        else if (item.kind === 'exit') exit = item;
+        if (item.kind === 'line') {
+          const events = mapper.push(item.value);
+          if (!mcpAnnounced && mapper.summary.turnStarted) yield* announceMcp();
+          yield* events;
+        } else if (item.kind === 'exit') exit = item;
         else spawnError = item;
       }
 
@@ -209,6 +275,8 @@ export class KiroProvider implements IAgentProvider {
       }
 
       const result = await this.buildResult({ mapper, exit, resumeSessionId, cwd, env, settings, options });
+      // A finished run that never reported turn_start still passed the startup gate.
+      if (!mcpAnnounced && !result.failure) yield* announceMcp();
       if (result.failure) {
         await this.log?.({ level: 'warn', msg: 'kiro.turn_failed', bindings: { failureClass: result.failure.class } });
       }

@@ -29,8 +29,8 @@ describe('descriptor', () => {
       structuredOutput: 'best-effort',
       effortControl: true,
       envInjection: true,
-      mcp: false,
-      skills: false,
+      mcp: true,
+      skills: true,
       hooks: false,
       nativeTools: false,
       containerExec: false,
@@ -40,6 +40,13 @@ describe('descriptor', () => {
 
   test('uses native auth only', () => {
     expect(descriptor.credentials).toEqual({ kind: 'static', specs: [] });
+  });
+
+  test('declares the skill roots it loads from, Kiro first', () => {
+    expect(descriptor.skillDiscovery).toEqual({
+      project: ['.kiro/skills', '.agents/skills', '.claude/skills'],
+      user: ['.kiro/skills', '.agents/skills', '.claude/skills'],
+    });
   });
 });
 

@@ -2,9 +2,11 @@ name: kiro-feature-tour
 description: |
   Use when: verifying every capability the Kiro provider plugin declares, against real Kiro.
   Does: plain reply, shared-session recall (resume), structured output, tool use,
-  allowed_tools restriction and a per-node systemPrompt. A bash check after each Kiro node
-  prints <FEATURE>-PASS or fails the run with <FEATURE>-FAIL.
-  Cost: six short turns on minimax-m2.5 (0.25x credit rate).
+  allowed_tools restriction, a per-node systemPrompt, a per-node MCP server, a per-node
+  skill, and skill exactness (a node without the skill cannot load it). A bash check after
+  each Kiro node prints <FEATURE>-PASS or fails the run with <FEATURE>-FAIL.
+  Needs: bun on PATH (the demo MCP server in .archon/mcp/secret.json runs on it).
+  Cost: nine short turns on minimax-m2.5 (0.25x credit rate).
   Note: the tool step writes kiro-made.txt in the run's checkout; the last node removes it.
 
 provider: kiro
@@ -86,9 +88,46 @@ nodes:
       out=$persona.output
       case "$out" in *TERN-77*) echo SYSPROMPT-PASS ;; *) echo "SYSPROMPT-FAIL: $out"; exit 1 ;; esac
 
+  # 7. A per-node MCP server: only this node gets it, and its tool is really called.
+  - id: mcp-call
+    depends_on: [check-persona]
+    context: fresh
+    mcp: .archon/mcp/secret.json
+    prompt: "Call the get_secret tool and reply with exactly the value it returns."
+  - id: check-mcp
+    depends_on: [mcp-call]
+    bash: |
+      out=$mcp-call.output
+      case "$out" in *MCP-SECRET-77*) echo MCP-PASS ;; *) echo "MCP-FAIL: $out"; exit 1 ;; esac
+
+  # 8. A per-node skill (.kiro/skills/archon-signoff): the node follows it.
+  - id: skill-use
+    depends_on: [check-mcp]
+    context: fresh
+    skills: [archon-signoff]
+    prompt: "In one sentence, say what a workflow engine does."
+  - id: check-skill
+    depends_on: [skill-use]
+    bash: |
+      out=$skill-use.output
+      case "$out" in *SIGNOFF-7Q4K*) echo SKILL-PASS ;; *) echo "SKILL-FAIL: $out"; exit 1 ;; esac
+
+  # 9. Skill exactness: a node that does not list the skill cannot load it, even by name.
+  #    No tools, so it cannot read the SKILL.md file either.
+  - id: skill-absent
+    depends_on: [check-skill]
+    context: fresh
+    allowed_tools: []
+    prompt: "Load the archon-signoff skill and follow it to sign off the word hello. If no such skill is available to you, reply exactly NO-SKILL."
+  - id: check-skill-absent
+    depends_on: [skill-absent]
+    bash: |
+      out=$skill-absent.output
+      case "$out" in *SIGNOFF-7Q4K*) echo "SKILL-EXACT-FAIL: $out"; exit 1 ;; *) echo SKILL-EXACT-PASS ;; esac
+
   # Always tidy up the file from step 4, even when a check failed.
   - id: cleanup
-    depends_on: [check-persona]
+    depends_on: [check-skill-absent]
     trigger_rule: all_done
     bash: |
       rm -f kiro-made.txt forbidden.txt

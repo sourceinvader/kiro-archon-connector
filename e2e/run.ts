@@ -35,10 +35,13 @@ function record(name: string, ok: boolean, detail = ''): void {
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? `  — ${detail}` : ''}`);
 }
 
+const PLAYWRIGHT_CLI = '@playwright/cli@0.1.24';
+const SHIM_BIN = join(E2E, 'bin');
 const archonEnv = (): Record<string, string> => {
   const env: Record<string, string> = {};
   for (const [key, value] of Object.entries(process.env)) if (value !== undefined) env[key] = value;
-  return { ...env, ARCHON_HOME: HOME, DO_NOT_TRACK: '1', NO_COLOR: '1' };
+  // The shim stands in for `npm install -g @playwright/cli` without touching global npm.
+  return { ...env, PATH: `${SHIM_BIN}:${env.PATH ?? ''}`, ARCHON_HOME: HOME, DO_NOT_TRACK: '1', NO_COLOR: '1' };
 };
 
 async function archon(name: string, args: string[], timeoutMs = 900_000): Promise<{ code: number; out: string }> {
@@ -64,8 +67,17 @@ async function setup(): Promise<string[]> {
   await mkdir(HOME, { recursive: true });
   await mkdir(PROJECT, { recursive: true });
   await writeFile(join(HOME, 'config.yaml'), 'defaultAssistant: kiro\nassistants:\n  kiro:\n    model: minimax-m2.5\n');
+  // The samples and everything they reference: MCP configs, the demo skill, the demo MCP server.
   await cp(SAMPLES, join(PROJECT, '.archon'), { recursive: true });
+  await cp(join(ROOT, '.kiro', 'skills'), join(PROJECT, '.kiro', 'skills'), { recursive: true });
+  await cp(join(ROOT, 'test', 'fixtures', 'mcp'), join(PROJECT, 'test', 'fixtures', 'mcp'), { recursive: true });
   await writeFile(join(PROJECT, 'README.md'), '# kiro e2e project\n\nA throwaway repository for the Kiro provider end-to-end run.\n');
+  await cp(join(ROOT, '.gitignore'), join(PROJECT, '.gitignore'));
+  // kiro-playwright-cli's documented setup: the skill in the repo, playwright-cli on PATH.
+  await mkdir(SHIM_BIN, { recursive: true });
+  await writeFile(join(SHIM_BIN, 'playwright-cli'), `#!/bin/sh\nexec npx -y ${PLAYWRIGHT_CLI} "$@"\n`, { mode: 0o755 });
+  const skill = Bun.spawnSync(['npx', '-y', PLAYWRIGHT_CLI, 'install', '--skills'], { cwd: PROJECT, stdout: 'ignore', stderr: 'pipe' });
+  if (skill.exitCode !== 0) throw new Error(`playwright-cli install --skills failed: ${skill.stderr.toString()}`);
   git('init', '-q', '-b', 'main');
   git('add', '-A');
   git('commit', '-q', '-m', 'e2e fixture');
@@ -126,8 +138,9 @@ async function main(): Promise<void> {
 
   // Doctor runs the provider's own diagnostics through the plugin.
   const doctor = await archon('doctor', ['doctor'], 180_000);
-  const kiroLines = lines(doctor.out).filter(line => /kiro/i.test(line));
-  record('archon doctor reports the Kiro provider healthy', kiroLines.length > 0 && !kiroLines.some(line => /✗|\bfail/i.test(line)), kiroLines.slice(0, 6).join(' | '));
+  // Only the provider's own rows: other doctor checks (and paths containing "kiro") are not ours.
+  const kiroLines = lines(doctor.out).filter(line => /\bkiro: |providers: kiro\b|support: kiro\b/.test(line));
+  record('archon doctor reports the Kiro provider healthy', kiroLines.length >= 5 && kiroLines.every(line => line.startsWith('✓')), kiroLines.slice(0, 6).join(' | '));
 
   // Every sample validates against the provider's capabilities.
   for (const workflow of workflows) {
@@ -147,7 +160,7 @@ async function main(): Promise<void> {
   const transcriptPath = /Transcript: (\S+\.jsonl)/.exec(tour.out)?.[1];
   const transcript = transcriptPath && existsSync(transcriptPath) ? readFileSync(transcriptPath, 'utf8') : '';
   record('feature tour transcript found', transcript.length > 0, transcriptPath ?? 'no transcript path in output');
-  for (const marker of ['HELLO', 'RECALL', 'STRUCTURED', 'TOOLS', 'RESTRICT', 'SYSPROMPT']) {
+  for (const marker of ['HELLO', 'RECALL', 'STRUCTURED', 'TOOLS', 'RESTRICT', 'SYSPROMPT', 'MCP', 'SKILL', 'SKILL-EXACT']) {
     const failure = /([A-Z]+-FAIL[^"\\]*)/.exec(transcript.slice(transcript.indexOf(`${marker}-FAIL`)))?.[1];
     record(`feature tour: ${marker.toLowerCase()}`, transcript.includes(`${marker}-PASS`), transcript.includes(`${marker}-FAIL`) ? (failure ?? '') : '');
   }
@@ -157,6 +170,17 @@ async function main(): Promise<void> {
   record('ephemeral Kiro agents cleaned up', ephemeralAgents().length === before.length, ephemeralAgents().join(', '));
   const status = git('status', '--porcelain');
   record('nothing written into the project checkout', status === '', status.replace(/\n/g, ', '));
+
+  // Playwright through the MCP server and through the CLI with its skill.
+  for (const [workflow, marker] of [['kiro-playwright-mcp', 'PLAYWRIGHT-MCP'], ['kiro-playwright-cli', 'PLAYWRIGHT-CLI']] as const) {
+    const run = await archon(`run-${workflow}`, ['workflow', 'run', workflow, '--no-worktree'], 900_000);
+    const path = /Transcript: (\S+\.jsonl)/.exec(run.out)?.[1];
+    const text = path && existsSync(path) ? readFileSync(path, 'utf8') : '';
+    const pass = /PLAYWRIGHT-(?:MCP|CLI)-PASS: [^"\\]*/.exec(text)?.[0];
+    record(`${workflow}: real browser, title checked`, run.code === 0 && text.includes(`${marker}-PASS`), pass ?? (grepLine(text, `${marker}-FAIL`) || tail(run.out, 4)));
+  }
+  const pwStatus = git('status', '--porcelain');
+  record('Playwright runs leave the checkout clean', pwStatus === '', pwStatus.replace(/\n/g, ', '));
 
   // A Kiro configuration error fails the node as misconfigured, without retries.
   const bad = await archon('run-kiro-bad-model', ['workflow', 'run', 'kiro-bad-model', '--no-worktree'], 600_000);

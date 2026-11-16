@@ -1,0 +1,33 @@
+name: kiro-playwright-mcp
+description: |
+  Use when: driving a real browser from a Kiro node through the Playwright MCP server.
+  Does: a browser-only node (mcp: .archon/mcp/playwright.json, allowed_tools: []) opens a
+  page headless and returns its title as structured output; a bash node checks it.
+  Needs: network access, Google Chrome (or Playwright's Chromium), and npx. The first run
+  downloads @playwright/mcp; if Kiro's 30-second MCP startup limit is hit, warm the cache
+  once with `npx -y @playwright/mcp@0.0.85 --help` and run again.
+  Cost: one turn on minimax-m2.5 (0.25x credit rate), several browser tool calls.
+
+provider: kiro
+model: minimax-m2.5
+
+nodes:
+  - id: browse
+    mcp: .archon/mcp/playwright.json
+    allowed_tools: []
+    prompt: |
+      Use the browser to open https://example.com and read the page title.
+      Close the browser when you are done.
+    output_format:
+      type: object
+      properties:
+        title:
+          type: string
+      required: [title]
+      additionalProperties: false
+
+  - id: check-title
+    depends_on: [browse]
+    bash: |
+      title=$browse.output.title
+      case "$title" in *"Example Domain"*) echo "PLAYWRIGHT-MCP-PASS: $title" ;; *) echo "PLAYWRIGHT-MCP-FAIL: $title"; exit 1 ;; esac

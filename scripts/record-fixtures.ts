@@ -96,6 +96,31 @@ async function workspace(): Promise<string> {
 }
 
 const base = ['chat', '--v3', '--no-interactive', '--output-format', 'stream-json'];
+const SECRET_SERVER = join(import.meta.dir, '..', 'test', 'fixtures', 'mcp', 'secret-server.ts');
+
+/** Run `fn` with a temporary global agent, as the plugin does for a workflow node. */
+async function withAgent<T>(config: Record<string, unknown>, fn: (name: string) => Promise<T>): Promise<T> {
+  const agentDir = join(HOME, '.kiro', 'agents');
+  await mkdir(agentDir, { recursive: true });
+  const name = `archon-run-fixture${Date.now()}`;
+  const file = join(agentDir, `${name}.json`);
+  await writeFile(file, JSON.stringify({ name, description: 'fixture', ...config }));
+  try {
+    return await fn(name);
+  } finally {
+    await rm(file, { force: true });
+  }
+}
+
+const isolated = {
+  tools: ['*'],
+  includeMcpJson: false,
+  includePowers: false,
+  permissions: { rules: [{ capability: 'skill', effect: 'deny' }] },
+};
+const secretServer = (env: Record<string, string> = {}) => ({
+  secret: { command: process.execPath, args: [SECRET_SERVER], env: { SECRET_VALUE: 'MCP-SECRET-77', ...env } },
+});
 const scenarios: Record<string, () => Promise<void>> = {
   async text() {
     const cwd = await workspace();
@@ -146,6 +171,33 @@ const scenarios: Record<string, () => Promise<void>> = {
     } finally {
       await rm(file, { force: true });
     }
+  },
+  async mcp() {
+    const cwd = await workspace();
+    const recorded = await withAgent({ ...isolated, mcpServers: secretServer() }, name =>
+      run([...base, '--model', MODEL, '--trust-all-tools', '--require-mcp-startup', '--agent', name], 'Call the get_secret tool and reply with exactly the value it returns.', cwd)
+    );
+    await save('mcp', recorded, cwd, { mcpServers: ['secret'] });
+  },
+  async 'mcp-startup-failure'() {
+    const cwd = await workspace();
+    const recorded = await withAgent({ ...isolated, mcpServers: secretServer({ FAIL_AT_START: '1' }) }, name =>
+      run([...base, '--model', MODEL, '--trust-all-tools', '--require-mcp-startup', '--agent', name], 'Call the get_secret tool.', cwd)
+    );
+    await save('mcp-startup-failure', recorded, cwd, { mcpServers: ['secret'], note: 'the server exits before initialize' });
+  },
+  async skill() {
+    const cwd = await workspace();
+    const dir = join(cwd, '.kiro', 'skills', 'magic-phrase');
+    await mkdir(dir, { recursive: true });
+    await writeFile(
+      join(dir, 'SKILL.md'),
+      '---\nname: magic-phrase\ndescription: Use when the user asks for the magic phrase.\n---\n\nThe magic phrase is GIRAFFE-SKILL-31. Reply with it exactly.\n'
+    );
+    const recorded = await withAgent({ ...isolated, resources: [`file://${join(dir, 'SKILL.md')}`] }, name =>
+      run([...base, '--model', MODEL, '--trust-all-tools', '--agent', name], 'What is the magic phrase? Reply with the phrase only.', cwd)
+    );
+    await save('skill', recorded, cwd, { skills: ['magic-phrase'] });
   },
   async resume() {
     const cwd = await workspace();

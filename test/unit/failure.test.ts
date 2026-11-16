@@ -22,6 +22,9 @@ describe('classifyKiroFailure', () => {
     [{ retryErrorType: 'CLIENT_ERROR' }, 'unknown'],
     // Documented exit code 4: the agent is unavailable.
     [{ stage: 'init', exitCode: 4 }, 'misconfigured'],
+    // MCP startup (--require-mcp-startup): typed error, or the documented exit code 3.
+    [{ errorType: 'mcp_connection_error', stage: 'init', exitCode: 3 }, 'misconfigured'],
+    [{ stage: 'init', exitCode: 3 }, 'misconfigured'],
     [{ stage: 'interrupted' }, 'transient'],
     [{ stage: 'init', exitCode: 1 }, 'unknown'],
     [{}, 'unknown'],

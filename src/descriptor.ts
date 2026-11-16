@@ -6,6 +6,7 @@ import {
 } from '@archon/provider-contract/plugin';
 import packageJson from '../package.json' with { type: 'json' };
 import { configJsonSchemas } from './config';
+import { KIRO_SKILL_DISCOVERY } from './skills';
 
 export const PROVIDER_ID = 'kiro';
 
@@ -22,9 +23,14 @@ export const KIRO_CAPABILITIES: ProviderCapabilities = {
   // `--resume-id <session>`; a missing session is confirmed through `--list-sessions`.
   sessionResume: true,
   sessionFork: false,
-  mcp: false,
+  // A workflow node's `mcp:` servers become the ephemeral agent's `mcpServers`, with the
+  // user's mcp.json and powers excluded; `--require-mcp-startup` fails the node as
+  // misconfigured before any model work when one does not start.
+  mcp: true,
   hooks: false,
-  skills: false,
+  // A workflow node's `skills:` are loaded as `file://` resources, and Kiro's own skill
+  // loader is denied, so the node sees exactly the skills it names (none when omitted).
+  skills: true,
   plugins: false,
   agents: false,
   // `allowed_tools` / `denied_tools` become `tools` / `excludedTools` of an ephemeral
@@ -59,4 +65,5 @@ export const descriptor: ProviderPluginDescriptor = providerPluginDescriptorSche
   credentials: { kind: 'static', specs: [] },
   configSchema: configJsonSchemas.install,
   config: { ...configJsonSchemas, stripUnknownKeys: true },
+  skillDiscovery: KIRO_SKILL_DISCOVERY,
 });

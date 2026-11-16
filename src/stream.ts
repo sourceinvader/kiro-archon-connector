@@ -40,6 +40,11 @@ export interface KiroRunSummary {
   displayError?: { message: string; errorType?: string; retryErrorType?: string };
   /** Kiro credits the turn used, summed over its turn summaries. */
   credits?: number;
+  /**
+   * Kiro submitted the instruction (`turn_start`). With `--require-mcp-startup` this happens
+   * only after every configured MCP server started.
+   */
+  turnStarted: boolean;
 }
 
 type Json = Record<string, unknown>;
@@ -64,7 +69,7 @@ export class KiroStreamMapper {
   private readonly openTools = new Set<string>();
   private readonly seenTools = new Set<string>();
   private lastHeartbeat = 0;
-  readonly summary: KiroRunSummary = { streamedText: '' };
+  readonly summary: KiroRunSummary = { streamedText: '', turnStarted: false };
 
   constructor(private readonly now: () => number = Date.now) {}
 
@@ -211,6 +216,9 @@ export class KiroStreamMapper {
   private onSessionInfo(update: Json): ProviderEvent[] {
     const kiro = isObject(update._meta) && isObject(update._meta.kiro) ? update._meta.kiro : undefined;
     switch (kiro?.kind) {
+      case 'turn_start':
+        this.summary.turnStarted = true;
+        return this.heartbeat();
       case 'turn_end': {
         const turnEnd = isObject(kiro.turnEnd) ? kiro.turnEnd : undefined;
         this.summary.nativeStopReason = str(turnEnd?.stopReason) ?? str(kiro.stopReason) ?? this.summary.nativeStopReason;
