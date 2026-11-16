@@ -1,14 +1,18 @@
 # Installing Archon and the Kiro plugin
 
 This guide takes a machine from nothing to a working Kiro node in Archon, on **macOS** or
-**Ubuntu 26.04**. You install four tools, then Archon, then this plugin from the private
-repository `sourceinvader/kiro-archon-connector`, and finish with a test run.
+**Ubuntu 26.04**. You install Kiro CLI and Archon, then add this plugin with one Archon
+command. You don't need GitHub credentials, Bun or a copy of this repository unless you
+want to [build the plugin yourself](#building-from-source).
+
+It assumes `sourceinvader/kiro-archon-connector` is public and has at least one GitHub
+release. [Publishing](README.md#publishing) in the README covers how to create one.
 
 | Step | macOS | Ubuntu 26.04 |
 |---|---|---|
-| 1. Tools: git, GitHub CLI, Bun, Kiro CLI | [macOS tools](#1-macos-tools) | [Ubuntu tools](#1-ubuntu-2604-tools) |
-| 2. Archon | [macOS Archon](#2-macos-archon) | [Ubuntu Archon](#2-ubuntu-2604-archon) |
-| 3. The plugin | [Install the plugin](#3-install-the-plugin) | same |
+| 1. Kiro CLI, signed in | [macOS](#1-macos-kiro-cli) | [Ubuntu](#1-ubuntu-2604-kiro-cli) |
+| 2. Archon | [macOS](#2-macos-archon) | [Ubuntu](#2-ubuntu-2604-archon) |
+| 3. The plugin: `archon plugin add` | [Add the plugin](#3-add-the-plugin) | same |
 | 4. Check it | [Check the install](#4-check-the-install) | same |
 | 5. Pick a cheap default model | [Default model](#5-pick-a-default-model) | same |
 | 6. First run | [First run](#6-first-run) | same |
@@ -24,74 +28,44 @@ repository `sourceinvader/kiro-archon-connector`, and finish with a test run.
 
 | | macOS (arm64) | Ubuntu 26.04 (arm64, in a container) |
 |---|---|---|
-| Tool installs | already installed: Kiro 2.37.1, Bun 1.3.11 | `apt` packages, GitHub CLI 2.104.0, Bun 1.4.4, Kiro CLI 3.3.0, all from the commands below |
-| Archon 0.14.0 | official release binary (the installer script was not run on the Mac) | official installer, including its `sudo` step |
-| Plugin build and install | fresh `gh repo clone` of the private repo, `install:local` | `install:local` from a copy of the repo (the container had no GitHub login) |
-| `archon plugin list`, `archon doctor` | pass | pass, except for "Kiro login", because the container was never signed in |
-| A real Kiro run (`kiro-hello`) | pass, including a worktree run | not run (needs a Kiro login) |
+| Kiro CLI | 2.37.1, already installed and signed in | 3.3.0 from the official installer, never signed in |
+| Archon 0.14.0 | official release binary | official installer, including its `sudo` step |
+| `archon plugin add` | Archon 0.14.0's own `plugin add` code, run against a local stand-in for github.com that served this repo's real release assets (built with `release.yml`'s command). The add, `@v0.1.0`, `update` and `remove` forms all worked. | The `linux-arm64` release binary starts and answers Archon's `initialize` (protocol 3, id `kiro`) |
+| `archon plugin list`, `archon doctor` | pass | pass with a from-source build, except for "Kiro login", because the container was never signed in |
+| A real Kiro run (`kiro-hello`) | pass | not run (needs a Kiro login) |
 
-The plugin's build and offline test suites also run in CI on GitHub's Ubuntu 26.04 x64
-runner and on macOS, on every push.
+The stand-in was needed because the repository was still private when this was written.
+`plugin add` against the real github.com, once the repository is public, is the one step
+that hasn't run. CI also builds the plugin and runs its offline tests on GitHub's Ubuntu
+26.04 x64 runner and on macOS, on every push.
 
 ---
 
-## 1. macOS tools
+## 1. macOS: Kiro CLI
 
-You need git, the GitHub CLI, Bun 1.3 or newer, and Kiro CLI.
-
-```sh
-xcode-select --install          # git, if `git --version` asks for it
-brew install gh                 # GitHub CLI
-gh auth login                   # sign in with an account that can read the repo
-curl -fsSL https://bun.com/install | bash
-exec $SHELL -l                  # pick up Bun's PATH change
-bun --version
-```
-
-Install Kiro CLI from [kiro.dev](https://kiro.dev/docs/cli/), then sign in:
+Install Kiro CLI from [kiro.dev](https://kiro.dev/docs/cli/) (or run
+`curl -fsSL https://cli.kiro.dev/install | bash`), then sign in:
 
 ```sh
-kiro-cli login
+kiro-cli login                  # opens your browser
 kiro-cli whoami                 # shows your account
 kiro-cli --version
 ```
 
+`archon plugin add` uses git, which macOS installs with the Xcode command line tools. If
+`git --version` asks you to install them, run `xcode-select --install`.
+
 Next: [macOS Archon](#2-macos-archon).
 
-## 1. Ubuntu 26.04 tools
+## 1. Ubuntu 26.04: Kiro CLI
 
 Run these as your normal user (not root). `sudo` asks for your password where it's needed.
 
-**Base packages.** Bun's installer needs `unzip`.
+**Base packages.** Kiro's installer needs `unzip`, and `archon plugin add` needs `git`.
 
 ```sh
 sudo apt update
 sudo apt install -y curl unzip git ca-certificates
-```
-
-**GitHub CLI**, from GitHub's own apt repository. Ubuntu 26.04's own `gh` package is
-version 2.46.0, which GitHub's maintainers say is broken, so don't use `apt install gh`
-without adding this repository first.
-
-```sh
-(type -p wget >/dev/null || (sudo apt update && sudo apt install wget -y)) \
-	&& sudo mkdir -p -m 755 /etc/apt/keyrings \
-	&& out=$(mktemp) && wget -nv -O$out https://cli.github.com/packages/githubcli-archive-keyring.gpg \
-	&& cat $out | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null \
-	&& sudo chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \
-	&& sudo mkdir -p -m 755 /etc/apt/sources.list.d \
-	&& echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null \
-	&& sudo apt update \
-	&& sudo apt install gh -y
-gh auth login                   # sign in with an account that can read the repo
-```
-
-**Bun.** It installs into `~/.bun/bin` and adds that folder to `PATH` in `~/.bashrc`.
-
-```sh
-curl -fsSL https://bun.com/install | bash
-source ~/.bashrc
-bun --version                   # 1.4.4 when this was tested
 ```
 
 **Kiro CLI.** It installs into `~/.local/bin`. Ubuntu's `~/.profile` puts that folder on
@@ -105,9 +79,9 @@ kiro-cli --version                       # kiro-cli 3.3.0 when this was tested
 
 Kiro needs glibc 2.34 or newer, and Ubuntu 26.04 has 2.43.
 
-**Sign in to Kiro.** On a desktop, `kiro-cli login` opens your browser. Over SSH or on a
-server with no browser, use the device flow: Kiro prints a URL and a code that you enter in
-a browser on any other device.
+**Sign in.** On a desktop, `kiro-cli login` opens your browser. Over SSH or on a server with
+no browser, use the device flow: Kiro prints a URL and a code that you enter in a browser on
+any other device.
 
 ```sh
 kiro-cli login --use-device-flow
@@ -121,7 +95,7 @@ Next: [Ubuntu Archon](#2-ubuntu-2604-archon).
 
 ---
 
-## 2. macOS Archon
+## 2. macOS: Archon
 
 The latest release is **0.14.0**. Homebrew's stable formula is still **0.13.2**. The plugin
 works on both, because it needs 0.13.2 or newer.
@@ -153,9 +127,9 @@ archon version                  # Archon CLI v0.14.0 (v0.13.2 with Homebrew)
 ```
 
 The meaning of `--providers=` is explained [below](#about---providers).
-Next: [Install the plugin](#3-install-the-plugin).
+Next: [Add the plugin](#3-add-the-plugin).
 
-## 2. Ubuntu 26.04 Archon
+## 2. Ubuntu 26.04: Archon
 
 ```sh
 curl -fsSL https://archon.diy/install | bash -s -- --providers=
@@ -185,50 +159,36 @@ doesn't need them. If you also want one of those, name it, for example
 
 ---
 
-## 3. Install the plugin
+## 3. Add the plugin
 
-The same on both systems. You need the GitHub CLI signed in (`gh auth status`) and Bun on
-`PATH`.
+The same on both systems:
 
 ```sh
-gh repo clone sourceinvader/kiro-archon-connector
-cd kiro-archon-connector
-bun install
-bun run install:local
+archon plugin add sourceinvader/kiro-archon-connector
 ```
-
-`install:local` compiles `archon-provider-kiro` for your machine and installs it into your
-Archon home (`$ARCHON_HOME`, or `~/.archon` by default), the same way `archon plugin add`
-would. It ends with:
 
 ```text
-Installed local/kiro-archon-connector (provider 'kiro', v0.1.0) into /home/you/.archon
-  executable: /home/you/.archon/plugins/archon-provider-kiro
-  receipt:    /home/you/.archon/plugins/installed/local/kiro-archon-connector/receipt.json
-Check it with: archon plugin list && archon doctor
+Installed sourceinvader/kiro-archon-connector from github.com/sourceinvader/kiro-archon-connector v0.1.0 (commit e3dd4d61…)
+  /Users/you/.archon/plugins/archon-provider-kiro  sha256 c18933bb…
+  This runs code published by sourceinvader.
 ```
 
-To install into another Archon home, set `ARCHON_HOME` or pass
-`--archon-home /absolute/path`. If `archon serve` is running, restart it. A new CLI command
-picks up the plugin straight away.
+That one command does all of the following:
+- reads the repository's `archon-plugin.json`
+- finds the latest GitHub release
+- downloads the build for your system
+- checks it against the release's `checksums.txt`
+- starts it once to confirm it's a Kiro provider speaking Archon's plugin protocol
+- records it in `~/.archon/plugins` (or `$ARCHON_HOME/plugins`)
 
-### Why not `archon plugin add`?
+To pin a version, add the tag, for example
+`archon plugin add sourceinvader/kiro-archon-connector@v0.1.0`.
 
-Archon's usual route, `archon plugin add owner/repo`, can't install from a private
-repository. It reads `archon-plugin.json` from `raw.githubusercontent.com` without your
-credentials, and Archon's own source says "a private repository cannot be installed". On
-this repository it fails like this:
+Release builds exist for macOS (arm64 and x64), Linux (x64 and arm64) and Windows (x64).
+Windows is untested. On any other system, [build from source](#building-from-source).
 
-```text
-Error: No archon-plugin.json for sourceinvader/kiro-archon-connector at commit cbc8d79…
-(https://raw.githubusercontent.com/sourceinvader/kiro-archon-connector/…/archon-plugin.json returned 404)
-```
-
-It also needs a GitHub release with prebuilt binaries, and this repository doesn't have one
-yet. If the repository is made public and a `v*` tag is pushed (see
-[Publishing](README.md#publishing)), `archon plugin add sourceinvader/kiro-archon-connector`
-will work. Run `bun run install:local --remove` first, because both installs would own the
-same executable.
+If `archon serve` is running, restart it. A new CLI command picks up the plugin straight
+away.
 
 ## 4. Check the install
 
@@ -240,7 +200,7 @@ archon doctor
 Expected:
 
 ```text
-local/kiro-archon-connector  provider  v0.1.0  9293ab7182f0  archon >=0.13.2
+sourceinvader/kiro-archon-connector  provider  v0.1.0  e3dd4d61a25a  archon >=0.13.2
 
 ✓ Installed providers: kiro (0.1.0)
 ✓ kiro: Kiro CLI: kiro-cli 2.37.1 at kiro-cli
@@ -252,9 +212,9 @@ local/kiro-archon-connector  provider  v0.1.0  9293ab7182f0  archon >=0.13.2
 All checks passed.
 ```
 
-The commit and the Kiro version will be whatever you have. A `○` line is information, not
-a failure. If `Kiro login` shows `✗`, sign in to Kiro (step 1) and run `archon doctor`
-again.
+The version, commit and Kiro version will be whatever you have. A `○` line is
+information, not a failure. If `Kiro login` shows `✗`, sign in to Kiro (step 1) and run
+`archon doctor` again.
 
 ## 5. Pick a default model
 
@@ -267,37 +227,71 @@ assistants:
     model: minimax-m2.5      # list models with: kiro-cli chat --list-models
 ```
 
-A node's own `model:` still wins, and the sample workflows all pin `minimax-m2.5` anyway.
-To make Kiro the provider for nodes that don't name one, add `defaultAssistant: kiro`. The
-other settings are in [Configuration](README.md#configuration).
+A node's own `model:` still wins. To make Kiro the provider for nodes that don't name one,
+add `defaultAssistant: kiro`. The other settings are in
+[Configuration](README.md#configuration).
 
 ## 6. First run
 
-From the clone:
+Run this from any git repository. Save the workflow as
+`.archon/workflows/kiro-hello.yaml`:
+
+```yaml
+name: kiro-hello
+description: One Kiro turn on a cheap model, then print the reply.
+provider: kiro
+model: minimax-m2.5
+
+nodes:
+  - id: hello
+    prompt: "Reply with exactly: KIRO-ARCHON-OK"
+
+  - id: show
+    depends_on: [hello]
+    bash: |
+      reply=$hello.output
+      echo "Kiro replied: $reply"
+```
 
 ```sh
-archon workflow run kiro-hello
+archon workflow run kiro-hello --no-worktree
 ```
 
 ```text
 [hello] Started  (kiro/minimax-m2.5)
-KIRO-ARCHON-OK
-[hello] Completed (10.2s)
-...
+[hello] Completed (12.1s)
+[show] Started
+[show] Completed (24ms)
 Kiro replied: KIRO-ARCHON-OK
 
 Workflow completed successfully.
 ```
 
-By default each run gets its own git worktree, branched from `origin/main`. So it sees what
-you have **pushed**, not your local edits. To run against your checkout as it is, add
-`--no-worktree`.
+`--no-worktree` runs in your checkout as it is. Without it, Archon runs each workflow in its
+own git worktree branched from `origin`. That needs a remote, and the run only sees what
+you've pushed. In a repository with no remote, Archon also prints a JSON warning line
+(`workflow.base_branch_auto_detect_failed … Set worktree.remote`) before the run. It's
+harmless with `--no-worktree`.
 
-The other samples are in [Try the sample workflows](README.md#try-the-sample-workflows).
-`kiro-playwright-cli` needs `--no-worktree`, because its skill is installed into your
-checkout as an untracked file, and a worktree doesn't contain untracked files.
+### More samples
 
-To use Kiro in your own project, give a node `provider: kiro` (or set `defaultAssistant`):
+This repository has more sample workflows: MCP servers, skills, Playwright, structured
+output, failures and cancellation. To try them, clone it (no credentials needed) and run
+them from the clone:
+
+```sh
+git clone https://github.com/sourceinvader/kiro-archon-connector.git
+cd kiro-archon-connector
+archon workflow run kiro-feature-tour --no-worktree
+```
+
+[Try the sample workflows](README.md#try-the-sample-workflows) in the README lists them all.
+Some need extra tools: Bun for the demo MCP server in `kiro-feature-tour`, and Node.js for
+the Playwright ones.
+
+### Your own workflows
+
+Give a node `provider: kiro` (or set `defaultAssistant: kiro`):
 
 ```yaml
 nodes:
@@ -315,21 +309,55 @@ nodes:
 **The plugin:**
 
 ```sh
-cd kiro-archon-connector
-git pull
-bun install
-bun run install:local      # rebuilds and replaces the installed copy
+archon plugin update sourceinvader/kiro-archon-connector
 ```
 
-Restart `archon serve` if it's running.
+This installs the latest release. Restart `archon serve` if it's running.
 
 **Archon:** rerun the installer from step 2 (or `brew upgrade archon`), then
-`archon doctor`. The plugin doesn't need rebuilding for a new Archon release as long as
+`archon doctor`. The plugin doesn't need reinstalling for a new Archon release as long as
 that release still speaks plugin protocol 3 (0.13.2 and 0.14.0 both do). If a later release
-changes the protocol, the plugin will stop serving Kiro nodes until it's updated. Check
-`archon plugin list` and `archon doctor` after every Archon upgrade.
+changes the protocol, the plugin will stop serving Kiro nodes until a new plugin release
+supports it. Check `archon plugin list` and `archon doctor` after every Archon upgrade.
 
 **Kiro CLI:** `kiro-cli update`. Read [Kiro 3.x](#kiro-3x) before moving from 2.x to 3.x.
+
+## Removing the plugin
+
+```sh
+archon plugin remove sourceinvader/kiro-archon-connector
+```
+
+## Building from source
+
+Only needed to try unreleased changes, to work on the plugin, or on a system with no
+release build. You need git and Bun 1.3 or newer.
+
+**Install Bun.** It installs into `~/.bun/bin` and adds that folder to `PATH` in your shell's
+startup file.
+
+```sh
+sudo apt install -y unzip                # Ubuntu only: Bun's installer needs it
+curl -fsSL https://bun.com/install | bash
+source ~/.bashrc                         # Ubuntu; on macOS: exec $SHELL -l
+bun --version                            # 1.3.11 (macOS) and 1.4.4 (Ubuntu) were tested
+```
+
+**Build and install.** If you added the plugin with `archon plugin add`, remove it first,
+because both installs would own the same executable:
+
+```sh
+archon plugin remove sourceinvader/kiro-archon-connector     # only if you added it
+git clone https://github.com/sourceinvader/kiro-archon-connector.git
+cd kiro-archon-connector
+bun install
+bun run install:local
+```
+
+`install:local` compiles `archon-provider-kiro` for your machine and installs it as
+`local/kiro-archon-connector`. Set `ARCHON_HOME` or pass `--archon-home /absolute/path` to
+use another Archon home. Rebuild after `git pull` by running `bun run install:local` again,
+and uninstall with `bun run install:local --remove`.
 
 ## Kiro 3.x
 
@@ -355,29 +383,22 @@ on 3.3.0 so far:
 If a Kiro node fails on 3.x, these are the first things to look at. Run with
 `--no-worktree`, and check `~/.kiro/agents` for `archon-run-*.json.bak` files.
 
-## Removing the plugin
-
-```sh
-cd kiro-archon-connector
-bun run install:local --remove
-```
-
 ## Troubleshooting
 
 | Symptom | Cause and fix |
 |---|---|
 | `archon version` shows an old version | Another `archon` comes first on `PATH`. Run `type -a archon` and remove the one you don't want (on a Mac, often `brew uninstall archon`). |
-| `bun: command not found` right after installing Bun | Your shell hasn't reloaded its startup file. Run `source ~/.bashrc` (Ubuntu) or `exec $SHELL -l` (macOS), or open a new terminal. |
-| `error: unzip is required to install bun` | `sudo apt install -y unzip` |
 | `kiro-cli: command not found` on Ubuntu | `~/.local/bin` isn't on `PATH` in this terminal. Run `export PATH="$HOME/.local/bin:$PATH"`, or log in again. |
+| Kiro's installer stops because `unzip` is missing | `sudo apt install -y unzip` |
 | `kiro-cli login` can't open a browser (SSH, server) | `kiro-cli login --use-device-flow` |
+| The Archon installer stops with an AVX2 message (Ubuntu x64) | The CPU or VM doesn't expose AVX2. Build Archon from source (step 2). |
+| `plugin add`: `Could not read refs of https://github.com/…` | git is missing or can't reach GitHub. Install git (step 1) and check your network or proxy settings. |
+| `plugin add`: `Could not find the latest release of …` | The repository has no published release yet, or GitHub couldn't be reached. Name a tag that exists (`…@v0.1.0`), or [build from source](#building-from-source). |
+| `plugin add`: `Release … has no archon-provider-kiro-<os>-<arch> for this platform` | There's no release build for your system (for example Windows on Arm). [Build from source](#building-from-source). |
+| `plugin add`: `… belongs to local/kiro-archon-connector. Remove it first` | A from-source install owns the executable. Run `bun run install:local --remove` in that clone, or the `archon plugin remove` command shown, then add again. |
 | `archon doctor`: `kiro: Kiro CLI` fails | `kiro-cli` isn't on the `PATH` Archon sees. This is common when `archon serve` runs as a service, which doesn't read `~/.profile`. Set `assistants.kiro.kiroPath: /home/you/.local/bin/kiro-cli` in `~/.archon/config.yaml`. |
 | `archon doctor`: `kiro: Kiro login` fails | Run `kiro-cli login`, then `kiro-cli whoami`. |
-| The Archon installer stops with an AVX2 message (Ubuntu x64) | The CPU or VM doesn't expose AVX2. Build Archon from source (step 2). |
-| `archon plugin add sourceinvader/kiro-archon-connector` fails with `returned 404` | The repository is private. Use `bun run install:local` (step 3). |
-| `gh repo clone` fails with "Could not resolve to a Repository" | The GitHub account you signed in with can't see the private repository. Check `gh auth status`, and ask the owner to add you as a collaborator. |
-| `archon-provider-kiro is already installed by …` | Another install (for example `archon plugin add`) owns the executable. Remove it with the `archon plugin remove …` command shown, then install again. |
 | `archon doctor` asks you to run `archon skill add .` | Archon 0.14 expects its `archon-cli` skill in any project that has `.claude/skills`, for example after `playwright-cli install --skills`. Run that command, or ignore it. It doesn't affect Kiro. |
 | `Cannot determine git remote … use --no-worktree` | The repository you're running in has no `origin`. Add one, or pass `--no-worktree`. |
-| The `kiro-playwright-mcp` node fails on its first run | Kiro gives an MCP server 30 seconds to start, and the first `npx` download can take longer. Run `npx -y @playwright/mcp@0.0.85 --help` once, then retry. |
+| The `kiro-playwright-mcp` sample fails on its first run | Kiro gives an MCP server 30 seconds to start, and the first `npx` download can take longer. Run `npx -y @playwright/mcp@0.0.85 --help` once, then retry. |
 | A node fails as `misconfigured` with `InvalidModelError` | The model name is wrong. List valid ones with `kiro-cli chat --list-models`. |

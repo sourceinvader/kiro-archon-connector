@@ -390,6 +390,16 @@ range, checked at install. **[Docs]**
   `packages/cli/src/commands/plugin.ts`. A private plugin has to be built from a clone and
   installed locally (this repo's `bun run install:local`). **[Tested]** on 0.14.0 /
   **[Source]**
+- **What `plugin add owner/repo` fetches, in order** (seen against a local stand-in for
+  github.com): `<repo>.git/info/refs` and `<repo>.git/HEAD` (`git ls-remote`, so git must be
+  installed), `raw/<owner>/<repo>/<commit>/archon-plugin.json`, `<owner>/<repo>/releases/latest`
+  (only the redirect's `Location` is read, for the tag), then
+  `releases/download/<tag>/<executable>-<os>-<arch>` and `releases/download/<tag>/checksums.txt`.
+  It prints "Installed owner/repo from github.com/owner/repo vX (commit …)", the file's
+  path and sha256, and "This runs code published by owner". `@tag`, `update` and `remove`
+  behaved as documented. The URLs are only overridable in Archon's own tests
+  (`PluginEnvironment.githubUrl`/`rawUrl`), so testing before a real release means calling
+  `pluginCommand` from Archon's source. **[Tested]** on 0.14.0 source
 - Release assets: `<executable>-<os>-<arch>` (`.exe` on Windows; `linux|darwin|windows` ×
   `x64|arm64`) plus `checksums.txt`. **[Docs]** Bun cross-compiles all five targets with
   `bun build --compile --target=bun-<os>-<arch>`. **[Tested]**

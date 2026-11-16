@@ -31,28 +31,28 @@ real turn. The plugin's flags and sign-in check work on 3.3.0. See
 
 ## Quick start
 
-**[INSTALL.md](INSTALL.md)** walks through installing the latest Archon and this plugin from
-the private GitHub repository on **macOS** or **Ubuntu 26.04** (including Bun, Kiro CLI and
-the GitHub CLI), with the expected output of each step and troubleshooting.
-The short version:
+**[INSTALL.md](INSTALL.md)** walks through installing Kiro CLI, the latest Archon and this
+plugin on **macOS** or **Ubuntu 26.04**, with the expected output of each step and
+troubleshooting. The short version:
 
-1. **Archon 0.13.2 or newer.** The plugin speaks plugin protocol 3. 0.13.0 used protocol 2,
+1. **Kiro CLI, signed in.** `kiro-cli login` (`--use-device-flow` without a browser, or set
+   `KIRO_API_KEY`), then check with `kiro-cli whoami`.
+2. **Archon 0.13.2 or newer.** The plugin speaks plugin protocol 3. 0.13.0 used protocol 2,
    and 0.13.2 is the oldest release tested (`brew upgrade archon` gives 0.13.2; the
    [installer](https://archon.diy/getting-started/installation/) gives the latest).
-2. **Kiro CLI, signed in.** `kiro-cli login` (or set `KIRO_API_KEY` for a headless account),
-   then check with `kiro-cli whoami`.
-3. **Bun 1.3+** to build the plugin.
-4. Build and install into your Archon home (`$ARCHON_HOME`, default `~/.archon`):
+3. **Add the plugin** from its latest GitHub release:
 
    ```sh
-   bun install
-   bun run install:local
-   archon plugin list      # local/kiro-archon-connector  provider  v0.1.0 ...
-   archon doctor           # ✓ kiro: Kiro CLI / Kiro login / Kiro model
+   archon plugin add sourceinvader/kiro-archon-connector
+   archon plugin list      # sourceinvader/kiro-archon-connector  provider  v0.1.0 ...
+   archon doctor           # ✓ kiro: Kiro CLI / Kiro login
    ```
 
-   `bun run install:local --remove` uninstalls it. Restart a running `archon serve`
-   after installing or removing it.
+   Restart a running `archon serve` afterwards. `archon plugin update …` and
+   `archon plugin remove …` manage it from then on.
+
+To run unreleased changes, build from a clone with Bun 1.3+ instead: `bun install && bun run
+install:local` (see [Building from source](INSTALL.md#building-from-source)).
 
 ### Try the sample workflows
 
@@ -267,10 +267,9 @@ from the recorded invalid-model failure by swapping its typed error fields, and 
 
 Archon installs provider plugins from GitHub releases, and only from **public**
 repositories: `archon plugin add` reads `archon-plugin.json` from
-`raw.githubusercontent.com` without credentials. While the repository is private, install
-from a clone with `bun run install:local` (see [INSTALL.md](INSTALL.md)). To publish, make
-the repository public, add the `archon-plugin` topic to list it on archon.diy, and push a
-tag:
+`raw.githubusercontent.com` without credentials. To publish, make the repository public,
+add the `archon-plugin` topic to list it on archon.diy, and push a tag that matches
+`package.json`'s version:
 
 ```sh
 git tag v0.1.0 && git push origin v0.1.0
@@ -285,6 +284,12 @@ archon plugin add <owner>/<repo>
 
 Remove a local install first (`bun run install:local --remove`), because both would own the
 same executable.
+
+Before the first real release, this path was checked by running Archon 0.14.0's own
+`plugin add`, `@tag`, `update` and `remove` code against a local stand-in for github.com
+that served assets built by `scripts/build.ts --all`. Archon installed the darwin-arm64
+build, verified its checksum and ran `kiro-hello`. The linux-arm64 build also starts and
+answers `initialize` on Ubuntu 26.04.
 
 ## Layout
 
