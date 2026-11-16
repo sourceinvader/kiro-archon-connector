@@ -1,0 +1,4 @@
+# Archon project config for running the sample workflows in .archon/workflows from this repo.
+# This repository has no remote, so name the branch worktrees start from.
+worktree:
+  baseBranch: main

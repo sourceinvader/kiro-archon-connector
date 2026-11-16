@@ -1,0 +1,7 @@
+{
+  "exitCode": null,
+  "signal": "SIGTERM",
+  "model": "minimax-m2.5",
+  "recordedAt": "2026-11-16T07:39:47.933Z",
+  "note": "SIGTERM sent to the process group 2.5s after the second tool call started"
+}

@@ -1,0 +1,18 @@
+name: kiro-cancel-demo
+description: |
+  Use when: checking that cancelling a run stops Kiro and the commands it started.
+  Does: Kiro runs a 4-minute `sleep`. Start it with --detach, then cancel it:
+    archon workflow run kiro-cancel-demo --no-worktree --detach
+    pgrep -fl "sleep 237"           # Kiro's command is running
+    archon workflow runs            # find the run id
+    archon workflow cancel <run-id>
+    pgrep -fl "sleep 237"           # prints nothing: it died with Kiro
+  The plugin signals Kiro's whole process group, so the commands Kiro started die with it.
+  Cost: one short turn on minimax-m2.5 (0.25x credit rate).
+
+provider: kiro
+model: minimax-m2.5
+
+nodes:
+  - id: long
+    prompt: "Run this exact shell command and wait for it to finish: sleep 237 && echo kiro-cancel-demo-done"

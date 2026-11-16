@@ -1,0 +1,9 @@
+{
+  "exitCode": 1,
+  "signal": null,
+  "synthesized": true,
+  "from": "bad-model",
+  "errorType": "ServiceQuotaExceededException",
+  "retryErrorType": "CLIENT_ERROR",
+  "message": "You have reached the limit of your monthly credits."
+}

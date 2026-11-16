@@ -1,0 +1,9 @@
+{
+  "exitCode": 1,
+  "signal": null,
+  "synthesized": true,
+  "from": "bad-model",
+  "errorType": "ThrottlingException",
+  "retryErrorType": "THROTTLING",
+  "message": "Too many requests, please wait before trying again."
+}

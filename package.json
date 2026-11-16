@@ -1,0 +1,30 @@
+{
+  "name": "kiro-archon-connector",
+  "version": "0.1.0",
+  "description": "Archon provider plugin that runs workflow nodes on Kiro CLI headless mode",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "scripts": {
+    "start": "bun src/main.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test test/unit",
+    "test:conformance": "bun test test/conformance",
+    "test:live": "KIRO_LIVE=1 bun test --timeout 600000 test/live",
+    "build": "bun scripts/build.ts",
+    "build:all": "bun scripts/build.ts --all",
+    "install:local": "bun scripts/install-local.ts",
+    "record-fixtures": "bun scripts/record-fixtures.ts",
+    "e2e": "bun e2e/run.ts",
+    "check": "bun run typecheck && bun run test && bun run test:conformance"
+  },
+  "dependencies": {
+    "@archon/provider-contract": "file:./vendor/provider-contract",
+    "jsonrepair": "3.14.0",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@types/bun": "1.3.10",
+    "typescript": "5.9.3"
+  }
+}

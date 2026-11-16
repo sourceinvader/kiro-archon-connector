@@ -1,0 +1,13 @@
+name: kiro-bad-model
+description: |
+  Use when: seeing how a Kiro configuration error surfaces in Archon.
+  Does: asks Kiro for a model that does not exist. The node fails as `misconfigured`,
+  carries Kiro's InvalidModelError text, and is not retried. Expected to FAIL.
+  Cost: none (Kiro rejects the model before any model work).
+
+provider: kiro
+model: no-such-model-e2e
+
+nodes:
+  - id: doomed
+    prompt: "say hi"

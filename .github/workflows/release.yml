@@ -1,0 +1,34 @@
+name: release
+
+# Push a tag such as v0.1.0 to publish the assets `archon plugin add owner/repo` installs:
+# archon-provider-kiro-<os>-<arch>[.exe] plus checksums.txt.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.11
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
+      - run: bun run test
+      - run: bun run test:conformance
+      - name: Check the tag matches package.json
+        run: test "v$(jq -r .version package.json)" = "$GITHUB_REF_NAME"
+      - run: bun scripts/build.ts --all
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --notes "Archon provider plugin for Kiro CLI. Install: archon plugin add ${GITHUB_REPOSITORY}@${GITHUB_REF_NAME}" \
+            dist/archon-provider-kiro-* dist/checksums.txt

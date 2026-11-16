@@ -1,0 +1,18 @@
+name: kiro-hello
+description: |
+  Use when: checking that Archon can reach Kiro through the Kiro provider plugin.
+  Does: one Kiro turn on a cheap model, then prints the reply.
+  Cost: one short turn on minimax-m2.5 (0.25x credit rate).
+
+provider: kiro
+model: minimax-m2.5
+
+nodes:
+  - id: hello
+    prompt: "Reply with exactly: KIRO-ARCHON-OK"
+
+  - id: show
+    depends_on: [hello]
+    bash: |
+      reply=$hello.output
+      echo "Kiro replied: $reply"

@@ -1,0 +1,9 @@
+{
+  "exitCode": 1,
+  "signal": null,
+  "synthesized": true,
+  "from": "bad-model",
+  "errorType": "AccessDeniedException",
+  "retryErrorType": "CLIENT_ERROR",
+  "message": "HTTP 403 AccessDeniedException: the token is not authorized."
+}

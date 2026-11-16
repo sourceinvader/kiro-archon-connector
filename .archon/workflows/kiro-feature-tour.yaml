@@ -1,0 +1,95 @@
+name: kiro-feature-tour
+description: |
+  Use when: verifying every capability the Kiro provider plugin declares, against real Kiro.
+  Does: plain reply, shared-session recall (resume), structured output, tool use,
+  allowed_tools restriction and a per-node systemPrompt. A bash check after each Kiro node
+  prints <FEATURE>-PASS or fails the run with <FEATURE>-FAIL.
+  Cost: six short turns on minimax-m2.5 (0.25x credit rate).
+  Note: the tool step writes kiro-made.txt in the run's checkout; the last node removes it.
+
+provider: kiro
+model: minimax-m2.5
+
+nodes:
+  # 1. A plain reply.
+  - id: hello
+    prompt: "Reply with exactly: KIRO-ARCHON-OK"
+  - id: check-hello
+    depends_on: [hello]
+    bash: |
+      out=$hello.output
+      case "$out" in *KIRO-ARCHON-OK*) echo HELLO-PASS ;; *) echo "HELLO-FAIL: $out"; exit 1 ;; esac
+
+  # 2. Session continuity: `context: shared` resumes the previous node's Kiro session.
+  - id: remember
+    depends_on: [check-hello]
+    context: fresh
+    prompt: "Remember the code word OSPREY for later. Reply only: NOTED"
+  - id: recall
+    depends_on: [remember]
+    context: shared
+    prompt: "What was the code word I asked you to remember? Reply with the word only."
+  - id: check-recall
+    depends_on: [recall]
+    bash: |
+      out=$recall.output
+      case "$out" in *OSPREY*) echo RECALL-PASS ;; *) echo "RECALL-FAIL: $out"; exit 1 ;; esac
+
+  # 3. Structured output (best-effort: schema in the prompt, JSON parsed and validated).
+  - id: classify
+    depends_on: [check-recall]
+    context: fresh
+    prompt: "What is 6 times 7?"
+    output_format:
+      type: object
+      properties:
+        answer:
+          type: number
+      required: [answer]
+      additionalProperties: false
+  - id: check-classify
+    depends_on: [classify]
+    bash: |
+      answer=$classify.output.answer
+      if [ "$answer" = "42" ]; then echo STRUCTURED-PASS; else echo "STRUCTURED-FAIL: $answer"; exit 1; fi
+
+  # 4. Tool use: Kiro writes a file in the checkout.
+  - id: write-file
+    depends_on: [check-classify]
+    context: fresh
+    prompt: "Create a file named kiro-made.txt in the current directory containing exactly the text MADE-BY-KIRO. Use a tool to do it. Then reply DONE."
+  - id: check-file
+    depends_on: [write-file]
+    bash: |
+      if grep -q MADE-BY-KIRO kiro-made.txt; then echo TOOLS-PASS; else echo TOOLS-FAIL; exit 1; fi
+
+  # 5. Tool restriction: with only read tools, Kiro has no way to create a file.
+  - id: restricted
+    depends_on: [check-file]
+    context: fresh
+    allowed_tools: [read]
+    prompt: "Create a file named forbidden.txt containing NOPE. If you have no tool that can create files, reply NO-WRITE-TOOL."
+  - id: check-restricted
+    depends_on: [restricted]
+    bash: |
+      if [ -e forbidden.txt ]; then rm -f forbidden.txt; echo RESTRICT-FAIL; exit 1; else echo RESTRICT-PASS; fi
+
+  # 6. A per-node system prompt.
+  - id: persona
+    depends_on: [check-restricted]
+    context: fresh
+    systemPrompt: "You are a terse assistant. End every reply with the exact token TERN-77."
+    prompt: "Say hello."
+  - id: check-persona
+    depends_on: [persona]
+    bash: |
+      out=$persona.output
+      case "$out" in *TERN-77*) echo SYSPROMPT-PASS ;; *) echo "SYSPROMPT-FAIL: $out"; exit 1 ;; esac
+
+  # Always tidy up the file from step 4, even when a check failed.
+  - id: cleanup
+    depends_on: [check-persona]
+    trigger_rule: all_done
+    bash: |
+      rm -f kiro-made.txt forbidden.txt
+      echo "cleaned up"

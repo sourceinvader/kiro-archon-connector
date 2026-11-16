@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 1,
+  "kind": "provider",
+  "name": "provider-kiro",
+  "description": "Runs Archon workflow nodes on Kiro CLI headless mode (kiro-cli chat --output-format stream-json).",
+  "executable": "archon-provider-kiro",
+  "compatibility": { "archon": ">=0.13.2" }
+}

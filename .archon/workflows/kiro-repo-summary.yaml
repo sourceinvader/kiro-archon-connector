@@ -1,0 +1,40 @@
+name: kiro-repo-summary
+description: |
+  Use when: you want a quick, read-only overview of the repository the run starts in.
+  Does: a read-only Kiro node (allowed_tools: [read]) looks around the checkout and returns
+  a structured summary; a bash node prints it. Kiro cannot change any file in this run.
+  Cost: one turn on minimax-m2.5 (0.25x credit rate); larger repositories read more files.
+
+provider: kiro
+model: minimax-m2.5
+
+nodes:
+  - id: summarize
+    allowed_tools: [read]
+    systemPrompt: "You are a careful code reviewer. Only state facts you verified by reading files."
+    prompt: |
+      Look at this repository (README, package or build files, top-level layout).
+      Summarize what it is, its main language, and up to three notable risks or gaps.
+    output_format:
+      type: object
+      properties:
+        purpose:
+          type: string
+        language:
+          type: string
+        risks:
+          type: array
+          items:
+            type: string
+      required: [purpose, language, risks]
+      additionalProperties: false
+
+  - id: report
+    depends_on: [summarize]
+    bash: |
+      purpose=$summarize.output.purpose
+      language=$summarize.output.language
+      summary=$summarize.output
+      echo "Purpose:  $purpose"
+      echo "Language: $language"
+      echo "Full summary (JSON): $summary"

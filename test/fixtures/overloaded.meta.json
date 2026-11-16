@@ -1,0 +1,9 @@
+{
+  "exitCode": 1,
+  "signal": null,
+  "synthesized": true,
+  "from": "bad-model",
+  "errorType": "InsufficientModelCapacityError",
+  "retryErrorType": "SERVER_ERROR",
+  "message": "The model is at capacity, try again later."
+}
