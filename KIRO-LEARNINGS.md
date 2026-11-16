@@ -497,7 +497,50 @@ Not used by the connector (it wraps stream-json instead), but surveyed: **[Docs]
 7. **Missing-session check** with `--list-sessions` before claiming a resume target is gone.
 8. **Pin a cheap model** (`minimax-m2.5`) for every test run; `auto` costs 4× more.
 
-## 16. Open questions
+## 16. Kiro CLI 3.x and Linux (checked 16 November 2026)
+
+Kiro CLI 3.0.0 (3 November 2026) made the V3 engine the default and retired the classic CLI
+and the desktop app's bundled CLI. 3.3.0 (12 November) is current. Releases since 2.37.1:
+3.0.0, 3.1.0, 3.2.0, 3.2.1, 3.3.0. **[Docs]**
+
+Checked on **3.3.0** in an Ubuntu 26.04 arm64 container (glibc 2.43), signed out. No model
+turn was run.
+
+- **Install:** `curl -fsSL https://cli.kiro.dev/install | bash` downloads a single
+  ~200 MB `kiro-cli` binary into `~/.local/bin` and prints a PATH hint. It doesn't change
+  shell files. Ubuntu's stock `~/.profile` adds `~/.local/bin` at the next login.
+  **[Tested]** Linux needs glibc 2.34+, with a musl build for older systems. **[Docs]**
+- **Signed-out `whoami --format json`** still prints `{"account":null}`, but now **exits 1**
+  (2.37.1 exited 0). The connector parses stdout and ignores the exit code, so
+  `archon doctor` still reports "No signed-in Kiro account". **[Tested]**
+- **Every flag the connector passes still exists:** `--v3`, `--no-interactive`,
+  `--output-format stream-json` ("JSON Lines on stdout", implies `--no-interactive`),
+  `--agent`, `--model`, `--effort`, `--trust-all-tools`, `--resume-id`, `--list-sessions`,
+  `--list-models`, `--require-mcp-startup`, `whoami --format`. **[Seen]** in `--help`
+- **Engine selection** (from `--help`): with no setting, interactive chat uses V3, while
+  `--no-interactive` or piped stdin uses **V2**, unless `--trust-all-tools` is passed, which
+  selects V3. `--agent-engine v1|v2|v3` and `chat.agentEngine` override that. The connector
+  always passes `--v3`. **[Seen]**
+- **`--trust-tools` help in 3.3.0** describes the richer matching the docs promised: tool
+  names, `@server`, `@server/tool`, `@builtin` and `*`/`?` patterns, with `--trust-tools=`
+  trusting nothing. **[Seen]** Whether an untrusted tool is now refused in a headless run
+  (unlike 2.37.1, [section 8](#8-tool-trust-does-not-restrict-tools)) is **[Unverified]**.
+  The connector doesn't depend on it, because it restricts tools through the agent's
+  `tools` list.
+- **New `--trust-workspace`:** "Skip the 'Trust this workspace?' prompt for this launch only
+  (V3 only). Hooks, agents, MCP servers and workflows from this folder load without asking."
+  How an untrusted folder behaves headless (for example a fresh Archon worktree) is
+  **[Unverified]**.
+- **Agent files:** 3.x "upgrades custom agents still in the V2 format", rewriting each file
+  in place after saving a `.json.bak`. Whether that touches the connector's ephemeral
+  `archon-run-*.json` agents is **[Unverified]**. **[Docs]**
+- **Headless sign-in:** `kiro-cli login --use-device-flow` prints a URL and a code to enter
+  in any browser. Other options are `--license free|pro`, `--identity-provider`, `--region`
+  and `--social google|github`. **[Seen]** 3.2.1 "fixes sign-in on Linux hosts with no
+  graphical session". **[Docs]** `KIRO_API_KEY` is for Pro, Pro+, Pro Max and Power
+  subscribers only. **[Docs]**
+
+## 17. Open questions
 
 - Does denying the `skill` capability also block on-demand steering, and anything else
   `disclose_context` serves?
@@ -506,4 +549,7 @@ Not used by the connector (it wraps stream-json instead), but surveyed: **[Docs]
 - Does `KIRO_HOME` move `~/.kiro` (agents, sessions, settings) completely?
 - Does `includePowers: false` remove power-provided steering?
 - Remote (`url`) and SSE MCP servers in an agent's `mcpServers` were never tried.
-- Behaviour on Linux and Windows (process groups, paths) is untested.
+- Behaviour on Linux and Windows (process groups, paths) is untested with a real turn.
+- Does a real turn on Kiro 3.x still produce the stream-json events in section 4, and do the
+  connector's ephemeral agents survive 3.x's V2-to-V3 agent upgrade unchanged?
+- Does V3's workspace-trust check change what loads in a headless run in a new folder?

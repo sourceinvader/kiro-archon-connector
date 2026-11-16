@@ -19,14 +19,21 @@ process. The plugin translates Kiro's ACP event stream into Archon's provider co
 typed failures and session resume.
 
 **Tested with** Archon 0.13.2 and 0.14.0 (official release binaries), Kiro CLI 2.37.1, on
-macOS arm64. See [Testing](#testing) for what is covered. Linux builds run the offline
-suites in CI; the Windows build compiles but is untested, and its cancellation falls back
-to signalling only the `kiro-cli` process (process groups are POSIX).
+macOS arm64. See [Testing](#testing) for what is covered. On Ubuntu 26.04 the full install
+works (see [INSTALL.md](INSTALL.md)), and CI runs the offline suites on Ubuntu 26.04 x64,
+but no real Kiro turn has been run on Linux. The Windows build compiles but is untested, and
+its cancellation falls back to signalling only the `kiro-cli` process (process groups are
+POSIX).
+
+**Kiro CLI 3.x** (3.0 shipped 3 November 2026; 3.3.0 is current) has not been tested with a
+real turn. The plugin's flags and sign-in check work on 3.3.0. See
+[INSTALL.md](INSTALL.md#kiro-3x) for what is still open.
 
 ## Quick start
 
 **[INSTALL.md](INSTALL.md)** walks through installing the latest Archon and this plugin from
-the private GitHub repository, with the expected output of each step and troubleshooting.
+the private GitHub repository on **macOS** or **Ubuntu 26.04** (including Bun, Kiro CLI and
+the GitHub CLI), with the expected output of each step and troubleshooting.
 The short version:
 
 1. **Archon 0.13.2 or newer.** The plugin speaks plugin protocol 3. 0.13.0 used protocol 2,
