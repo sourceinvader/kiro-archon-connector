@@ -57,7 +57,8 @@ install:local` (see [Building from source](INSTALL.md#building-from-source)).
 ### Try the sample workflows
 
 This repository carries ready-to-run workflows in `.archon/workflows/`. Each one pins the
-cheap `minimax-m2.5` model. Run them from this directory:
+cheap `minimax-m2.5` model, except `kiro-gherkin-playwright-loop`, which pins the cheaper
+`minimax-m2.1`. Run them from this directory:
 
 | Workflow | What it shows | Expected result |
 |---|---|---|
@@ -65,6 +66,7 @@ cheap `minimax-m2.5` model. Run them from this directory:
 | `kiro-feature-tour` | Plain reply, session recall (`context: shared`), structured output, tool use, `allowed_tools`, `systemPrompt`, a per-node MCP server, a per-node skill, and skill exactness; each step checked by a bash node | completes; every check node passes |
 | `kiro-playwright-mcp` | A browser-only node (`mcp: .archon/mcp/playwright.json`, `allowed_tools: []`) opens example.com and returns its title | completes, title `Example Domain` |
 | `kiro-playwright-cli` | A node with `skills: [playwright-cli]` drives the browser through `playwright-cli` shell commands | completes, title `Example Domain` (needs the setup below) |
+| `kiro-gherkin-playwright-loop` | A `loop_group`: each round Kiro probes a site with `playwright-cli`, writes one or two Gherkin scenarios and turns them into Playwright tests, then a bash node runs them; failures send the run back to the probe (3 rounds at most). Pins `minimax-m2.1`; needs Archon 0.14.0, Node.js and the Playwright CLI setup below | completes, prints `GHERKIN-LOOP-PASS` and where the feature file and tests are |
 | `kiro-repo-summary` | A read-only node (`allowed_tools: [read]`) with `output_format` summarising the repository | completes, prints purpose and language |
 | `kiro-session-probe` | Session resume: `context: shared` between plain nodes and between nodes on different ephemeral agents, and a `loop_group` with `fresh_context: false` (round 2 remembers round 1) against `fresh_context: true` (it forgets). Needs Archon 0.14.0 | completes; prints `SESSION-SHARED-PASS`, `SESSION-CROSS-AGENT-PASS`, `SESSION-LOOP-PASS`, `SESSION-LOOP-FRESH-PASS` |
 | `kiro-bad-model` | How a configuration error surfaces | **fails** as `misconfigured` with Kiro's `InvalidModelError`, no retry |
@@ -82,6 +84,8 @@ archon workflow run kiro-bad-model --no-worktree        # expected to fail
 npm install -g @playwright/cli@latest
 playwright-cli install --skills                          # writes .claude/skills/playwright-cli
 archon workflow run kiro-playwright-cli --no-worktree
+archon workflow run kiro-gherkin-playwright-loop --no-worktree               # TodoMVC demo
+archon workflow run kiro-gherkin-playwright-loop --no-worktree https://the-internet.herokuapp.com/challenging_dom
 
 archon workflow run kiro-cancel-demo --no-worktree --detach
 pgrep -fl "sleep 237"                                    # Kiro's command is running
@@ -92,10 +96,11 @@ pgrep -fl "sleep 237"                                    # nothing: it died with
 
 With `--no-worktree` a run uses your checkout as it is, including uncommitted changes.
 Without the flag, each run gets its own worktree branched from `origin/main` (tested with
-`kiro-hello`), so it only sees what you have pushed. `kiro-playwright-cli` always needs
-`--no-worktree`: its skill is an untracked file in your checkout, and a worktree doesn't
-include untracked files. The feature tour writes `kiro-made.txt` and removes it in its last
-node.
+`kiro-hello`), so it only sees what you have pushed. `kiro-playwright-cli` and
+`kiro-gherkin-playwright-loop` always need `--no-worktree`: the skill is an untracked file
+in your checkout, and a worktree doesn't include untracked files. The feature tour writes
+`kiro-made.txt` and removes it in its last node. The Gherkin loop writes into the run's
+artifacts directory, not your checkout.
 
 ## Configuration
 

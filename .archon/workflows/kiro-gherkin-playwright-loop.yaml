@@ -1,0 +1,175 @@
+name: kiro-gherkin-playwright-loop
+description: |
+  Use when: checking that a loop_group (a loop over several nodes) runs on Kiro, with a
+  real browser task in the loop.
+  Does: each round, Kiro probes a website with playwright-cli, writes one or two Gherkin
+  scenarios, and turns them into Playwright tests; a bash node then runs the tests. If any
+  test fails, the next round starts again at the probe with the failure output (3 rounds
+  at most). Kiro writes every .feature and .spec.ts file. The bash nodes only install
+  @playwright/test, run the tests and check the result.
+  Site: the run's message, e.g.
+    archon workflow run kiro-gherkin-playwright-loop --no-worktree https://example.org/
+  or https://demo.playwright.dev/todomvc/ when the message is empty.
+  Output: the feature file and tests are kept in the run's artifacts directory
+  ($ARTIFACTS_DIR/gherkin-e2e); the report node prints where.
+  Needs: Archon >= 0.14.0 (on_exhausted), Node.js with npm, network access, and the
+  kiro-playwright-cli setup in this repository:
+    npm install -g @playwright/cli@latest     # puts playwright-cli on PATH
+    playwright-cli install --skills           # writes .claude/skills/playwright-cli
+  Run it with --no-worktree: the skill is an untracked file, so a worktree lacks it.
+  Cost: 3 Kiro turns per round on minimax-m2.1 (0.15x credit rate), at most 3 rounds.
+
+provider: kiro
+model: minimax-m2.1
+
+nodes:
+  # Picks the site and installs the Playwright test runner where Kiro will write the tests.
+  - id: setup
+    bash: |
+      site=${ARGUMENTS:-https://demo.playwright.dev/todomvc/}
+      case "$site" in
+        http://*|https://*) ;;
+        *) echo "GHERKIN-LOOP-FAIL: the run's message must be a URL, got: $site" >&2; exit 1 ;;
+      esac
+      ws="$ARTIFACTS_DIR/gherkin-e2e"
+      mkdir -p "$ws/features" "$ws/tests" && cd "$ws" || exit 1
+      [ -f package.json ] || npm init -y >/dev/null || exit 1
+      npm install --no-audit --no-fund --loglevel=error @playwright/test@1.64.1 >&2 || exit 1
+      npx --no-install playwright install chromium >&2 || exit 1
+      printf '%s' "$site"
+
+  - id: rounds
+    depends_on: [setup]
+    loop_group:
+      max_iterations: 3
+      # Ends the loop once run-tests reports every test green.
+      until_bash: 'out=$run-tests.output; case "$out" in *TESTS-GREEN*) exit 0 ;; *) exit 1 ;; esac'
+      # Running out of rounds completes the group; the report node then fails the run.
+      on_exhausted: complete
+      # Default (false): every Kiro node in the loop continues one conversation, across
+      # rounds too, so a later round remembers what it already tried.
+      fresh_context: false
+      nodes:
+        - id: probe
+          skills: [playwright-cli]
+          prompt: |
+            You are exploring a website so that acceptance tests can be written for it.
+            Site: $setup.output
+
+            Use playwright-cli (see the playwright-cli skill) to open the site, take a
+            snapshot, and do one or two things a user would do there (for example add an
+            item, follow a link, or fill in a form). For each action, note the role and
+            accessible name of the element, what visibly changed on the page (exact text),
+            and the Playwright code that playwright-cli printed for it.
+
+            Results of the previous round's tests (empty in the first round):
+            $LOOP_PREV.run-tests.output
+
+            If tests failed above, go back to the page and look at exactly the steps,
+            elements and texts that failed: what the page really shows and which locator
+            finds it.
+
+            Do not write any files. Close the browser when you are done (playwright-cli close).
+            Reply with your findings as a short list.
+
+        - id: write-gherkin
+          depends_on: [probe]
+          prompt: |
+            Write Gherkin acceptance criteria for the site $setup.output, based on these
+            findings from a real browser:
+            $probe.output
+
+            Write the file $ARTIFACTS_DIR/gherkin-e2e/features/site.feature with one
+            Feature and one or two Scenarios, no more. A Scenario Outline with two or three
+            Examples rows counts as one. Rules:
+            - Every step must be something the findings show working, using the exact
+              visible texts from the findings.
+            - Each scenario starts from a fresh load of the site.
+            - Each scenario has at least one Then step with an observable outcome.
+            If the file already exists from an earlier round, keep it as it is, unless the
+            findings show that a scenario describes something the site does not do; then
+            correct only that scenario.
+
+            Reply with the contents of the file.
+
+        - id: write-tests
+          depends_on: [write-gherkin]
+          skills: [playwright-cli]
+          prompt: |
+            Turn the Gherkin in $ARTIFACTS_DIR/gherkin-e2e/features/site.feature into
+            Playwright tests for $setup.output.
+
+            Browser findings:
+            $probe.output
+
+            Results of the previous round's tests (empty in the first round):
+            $LOOP_PREV.run-tests.output
+
+            Rules:
+            - Write TypeScript files in $ARTIFACTS_DIR/gherkin-e2e/tests/, one per
+              scenario, named after the scenario in kebab-case, ending in .spec.ts.
+            - Import { test, expect } from '@playwright/test' (already installed in
+              $ARTIFACTS_DIR/gherkin-e2e).
+            - Each test's title contains its Scenario's name exactly as written in the
+              feature file. For a Scenario Outline, write one test per Examples row.
+            - Put each Given/When/Then step as a comment above the code that performs it.
+            - Each test starts with page.goto() to the site and asserts every Then step
+              with expect().
+            - Use role, label or text locators, like the Playwright code in the findings.
+              You may use playwright-cli to try a locator on the live page; close the
+              browser afterwards.
+            - If tests failed in the previous round, fix those tests. Do not delete them,
+              weaken their assertions, or use test.skip or test.fixme.
+            - Delete files in tests/ that no longer match a scenario.
+            - You may run the tests with:
+                cd $ARTIFACTS_DIR/gherkin-e2e && npx playwright test --reporter=line
+
+            Reply with one line per test: its file and title.
+
+        # Must exit 0 even when tests fail: a failed body node would fail the whole group.
+        - id: run-tests
+          depends_on: [write-tests]
+          bash: |
+            cd "$ARTIFACTS_DIR/gherkin-e2e" || exit 1
+            scenarios=$(grep -h -E '^[[:space:]]*Scenario( Outline)?:' features/*.feature 2>/dev/null \
+              | sed -E 's/^[[:space:]]*Scenario( Outline)?:[[:space:]]*//; s/[[:space:]]+$//')
+            missing=$(printf '%s\n' "$scenarios" | while IFS= read -r name; do
+              [ -n "$name" ] && ! grep -rqF -- "$name" tests && echo "No test title contains the scenario name: $name"
+            done)
+            # Playwright sets FORCE_COLOR for its workers; an inherited NO_COLOR then makes Node warn.
+            out=$(env -u NO_COLOR -u FORCE_COLOR PLAYWRIGHT_HTML_OPEN=never npx --no-install playwright test --reporter=line 2>&1)
+            code=$?
+            printf '%s\n' "$out" | tail -n 60
+            [ -z "$scenarios" ] && echo "No Scenario found in features/*.feature"
+            [ -n "$missing" ] && printf '%s\n' "$missing"
+            if [ "$code" -eq 0 ] && [ -n "$scenarios" ] && [ -z "$missing" ]; then
+              echo "TESTS-GREEN"
+            else
+              echo "TESTS-RED"
+            fi
+
+  - id: report
+    depends_on: [rounds]
+    bash: |
+      out=$rounds.output
+      ws="$ARTIFACTS_DIR/gherkin-e2e"
+      echo "Files: $ws"
+      echo "--- features/site.feature"
+      cat "$ws/features/site.feature"
+      echo "--- tests"
+      ls "$ws/tests"
+      echo "--- last test run"
+      printf '%s\n' "$out"
+      case "$out" in
+        *TESTS-GREEN*) echo "GHERKIN-LOOP-PASS: every test generated from the Gherkin passes" ;;
+        *) echo "GHERKIN-LOOP-FAIL: tests still fail after the last round"; exit 1 ;;
+      esac
+
+  # Runs even after a failure: closes any browser Kiro left open, drops node_modules.
+  - id: cleanup
+    depends_on: [report]
+    trigger_rule: all_done
+    bash: |
+      playwright-cli close >/dev/null 2>&1 || true
+      rm -rf "$ARTIFACTS_DIR/gherkin-e2e/node_modules"
+      echo "cleaned up"

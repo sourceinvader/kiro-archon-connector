@@ -186,6 +186,16 @@ A `loop_group` repeats a sealed body of nodes until `until_bash` exits 0 (or a p
   **[Docs]**
 - Named owner sessions (`context: { resume: <pre-loop node> }` in the body) need
   `sessionFork`, so they are unavailable on Kiro. **[Docs]** + the fork refusal above.
+- A real repair loop works on Kiro (`kiro-gherkin-playwright-loop`, minimax-m2.1, Archon
+  0.14.0). The body is probe (Kiro + playwright-cli skill), write-gherkin (Kiro),
+  write-tests (Kiro + skill) and run-tests (bash). It ran against a page whose button
+  labels and ids change on every load. In round 1 a test that clicked a link by label
+  timed out, so run-tests printed `TESTS-RED` and `until_bash` exited 1. In round 2 the
+  probe re-checked the page, the scenario stopped relying on the label, and 2/2 tests
+  passed (8m33s in all). All six Kiro turns ran in one session: the run's events show
+  `sessionOrigin: fresh` for round 1's probe and `resumed` for every later turn, across
+  agents with and without the skill. Against the TodoMVC demo, both minimax-m2.5 and
+  minimax-m2.1 went green in round 1 (about 1m30s). **[Tested]**
 - The CLI prints `Loop-group node '<id>' completed after N iterations`. Each `until_bash`
   check appears in the transcript as an `exec_output` step named
   `<group>-iteration-<n>`. Bash results are in the transcript's `stdout_tail`.
