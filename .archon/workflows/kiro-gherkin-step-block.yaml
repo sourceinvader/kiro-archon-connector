@@ -1,0 +1,52 @@
+name: kiro-gherkin-step-block
+description: |
+  Use when: another workflow includes it with `include:` (kiro-fanout-include). It is a block
+  that takes one Gherkin step and returns a checked rewrite of it.
+  Does: a loop_group (Kiro rewrites the step, a bash node checks the shape) runs until the
+  rewrite passes, at most 2 rounds. A failed check sends its reason to the next round through
+  $LOOP_PREV.
+  Input: statement (required), the Gherkin step. Includers pass it through with: or
+  fan_out.as. To run it on its own:
+    archon workflow run kiro-gherkin-step-block --no-worktree --input statement="Then they see the dashboard"
+  Output: the block's result ($<include-id>.output) is the loop_group's last output, a line
+  starting with STEP-PASS or STEP-RETRY.
+provider: kiro
+model: minimax-m2.5
+
+inputs:
+  statement:
+    required: true
+    description: one Gherkin step, e.g. "Given a user is on the login page"
+returns: refine
+
+nodes:
+  - id: refine
+    loop_group:
+      max_iterations: 2
+      until_bash: 'out=$check.output; case "$out" in STEP-PASS*) exit 0 ;; *) exit 1 ;; esac'
+      # Running out of rounds completes the block with its last output (STEP-RETRY ...)
+      # instead of failing the includer's run.
+      on_exhausted: complete
+      nodes:
+        - id: rewrite
+          prompt: |
+            Here is one Gherkin step: $INPUTS.statement
+
+            Rewrite it so that it is concrete and testable, keeping its keyword
+            (Given, When, Then, And or But).
+            Why the previous rewrite was rejected (empty in the first round):
+            $LOOP_PREV.check.output
+
+            Reply with exactly one line and nothing else: the rewritten step.
+        # Must exit 0 even when the check fails: a failed body node fails the whole loop.
+        # A bash node reads the input as the env var INPUTS_STATEMENT, not $INPUTS.statement.
+        - id: check
+          depends_on: [rewrite]
+          bash: |
+            out=$rewrite.output
+            line=$(printf '%s\n' "$out" | sed -n '/[^[:space:]]/{p;q;}')
+            keyword=$(printf '%s' "$INPUTS_STATEMENT" | awk '{print $1}')
+            case "$line" in
+              "$keyword "*) printf 'STEP-PASS %s' "$line" ;;
+              *) printf 'STEP-RETRY the reply must be one line starting with "%s", got: %s' "$keyword" "$line" ;;
+            esac

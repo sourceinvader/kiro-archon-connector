@@ -1,0 +1,76 @@
+name: kiro-nested-loop-groups
+description: |
+  Use when: checking a loop_group inside a loop_group on Kiro, or walking an array one item at
+  a time in a loop.
+  Does: the outer loop_group goes through an array of Gherkin steps, one per round: a bash
+  node counts up an index from $LOOP_PREV and picks that item. For each step, an inner
+  loop_group runs two rounds of Kiro, the second one improving on the first ($LOOP_PREV again).
+  The outer loop stops after the last step. A bash node checks that every step was handled.
+  To handle all items at once instead of one per round, use fan_out (kiro-fanout-include,
+  kiro-fanout-workflow). Archon's docs call nested loop groups supported but not hardened yet.
+  Input: none. Run with
+    archon workflow run kiro-nested-loop-groups --no-worktree
+  Needs: jq.
+  Output: prints one line per step and NESTED-LOOP-PASS.
+  Cost: 6 Kiro turns on minimax-m2.5 (3 steps x 2 inner rounds).
+provider: kiro
+model: minimax-m2.5
+
+nodes:
+  - id: split
+    bash: printf '%s' '["Given a user is on the login page","When they enter valid credentials","Then they see the dashboard"]'
+
+  - id: outer
+    depends_on: [split]
+    loop_group:
+      max_iterations: 10   # a safety bound; the until_bash below ends the loop
+      until_bash: 'i=$pick.output; n=$count.output; [ "$i" -ge $((n - 1)) ]'
+      nodes:
+        # The index: 0 in the first round, then one more than last round's.
+        - id: pick
+          bash: |
+            prev=$LOOP_PREV.pick.output
+            if [ -z "$prev" ]; then printf 0; else printf '%s' $((prev + 1)); fi
+        - id: count
+          bash: |
+            items=$split.output
+            printf '%s' "$items" | jq length
+        - id: item
+          depends_on: [pick]
+          bash: |
+            items=$split.output
+            i=$pick.output
+            printf '%s' "$items" | jq -r ".[$i]"
+
+        - id: inner
+          depends_on: [item, count]
+          loop_group:
+            max_iterations: 2
+            on_exhausted: complete   # two rounds is the plan, not a failure
+            until_bash: 'false'      # never passes, so the inner loop always runs both rounds
+            nodes:
+              - id: draft
+                prompt: |
+                  Gherkin step: $item.output
+                  Your previous version (empty in the first round): $LOOP_PREV.draft.output
+
+                  Write one concrete, testable version of this step, improving on your
+                  previous version if there is one. Keep the step's keyword.
+                  Reply with exactly one line and nothing else.
+
+        - id: record
+          depends_on: [inner]
+          bash: |
+            i=$pick.output
+            step=$item.output
+            final=$inner.output
+            printf 'step %s: %s\n  -> %s\n' "$i" "$step" "$final" | tee -a "$ARTIFACTS_DIR/nested-loop.txt"
+
+  - id: check
+    depends_on: [outer]
+    bash: |
+      cat "$ARTIFACTS_DIR/nested-loop.txt"
+      want=3
+      got=$(grep -c '^step ' "$ARTIFACTS_DIR/nested-loop.txt")
+      [ "$got" = "$want" ] || { echo "NESTED-LOOP-FAIL: $got of $want steps handled"; exit 1; }
+      echo NESTED-LOOP-PASS

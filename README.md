@@ -69,6 +69,10 @@ cheap `minimax-m2.5` model, except `kiro-gherkin-playwright-loop`, which pins th
 | `kiro-gherkin-playwright-loop` | A `loop_group`: each round Kiro probes a site with `playwright-cli`, writes one or two Gherkin scenarios and turns them into Playwright tests, then a bash node runs them; failures send the run back to the probe (3 rounds at most). Pins `minimax-m2.1`; needs Archon 0.14.0, Node.js and the Playwright CLI setup below | completes, prints `GHERKIN-LOOP-PASS` and where the feature file and tests are |
 | `kiro-repo-summary` | A read-only node (`allowed_tools: [read]`) with `output_format` summarising the repository | completes, prints purpose and language |
 | `kiro-session-probe` | Session resume: `context: shared` between plain nodes and between nodes on different ephemeral agents, and a `loop_group` with `fresh_context: false` (round 2 remembers round 1) against `fresh_context: true` (it forgets). Needs Archon 0.14.0 | completes; prints `SESSION-SHARED-PASS`, `SESSION-CROSS-AGENT-PASS`, `SESSION-LOOP-PASS`, `SESSION-LOOP-FRESH-PASS` |
+| `kiro-subworkflow` | A `workflow:` node runs `kiro-step-child` as its own child run, twice in a row; the second gets the first one's output. Needs Archon 0.14.0 | completes, prints `SUBWORKFLOW-PASS` |
+| `kiro-fanout-workflow` | `workflow:` + `fan_out:`: splits a Gherkin feature into its steps (a JSON array) and starts one `kiro-step-child` run per step, 3 at a time. Needs jq | completes, prints `FANOUT-WORKFLOW-PASS` |
+| `kiro-fanout-include` | `include:` + `fan_out:`: runs the block `kiro-gherkin-step-block` (a `loop_group` that rewrites a step until a check passes) once per step, inside this one run with no child runs. Needs jq | completes, prints `FANOUT-INCLUDE-PASS` and each rewritten step |
+| `kiro-nested-loop-groups` | A `loop_group` inside a `loop_group`: the outer loop walks an array one step per round, the inner one runs two Kiro rounds per step. Needs jq | completes, prints `NESTED-LOOP-PASS` |
 | `kiro-bad-model` | How a configuration error surfaces | **fails** as `misconfigured` with Kiro's `InvalidModelError`, no retry |
 | `kiro-cancel-demo` | Cancelling a running node kills Kiro and its commands | see the steps in the workflow's description |
 
@@ -79,6 +83,11 @@ archon workflow run kiro-playwright-mcp --no-worktree
 archon workflow run kiro-repo-summary --no-worktree
 archon workflow run kiro-session-probe --no-worktree       # needs Archon 0.14.0
 archon workflow run kiro-bad-model --no-worktree        # expected to fail
+archon workflow run kiro-subworkflow --no-worktree         # child runs
+archon workflow run kiro-fanout-workflow --no-worktree     # one child run per Gherkin step
+archon workflow run kiro-fanout-workflow --no-worktree "$(cat my.feature)"
+archon workflow run kiro-fanout-include --no-worktree      # one block copy per step, one run
+archon workflow run kiro-nested-loop-groups --no-worktree
 
 # Playwright CLI: one-time setup in this repository, then run
 npm install -g @playwright/cli@latest
@@ -101,6 +110,14 @@ Without the flag, each run gets its own worktree branched from `origin/main` (te
 in your checkout, and a worktree doesn't include untracked files. The feature tour writes
 `kiro-made.txt` and removes it in its last node. The Gherkin loop writes into the run's
 artifacts directory, not your checkout.
+
+`kiro-step-child` and `kiro-gherkin-step-block` are the parts the samples above use: a
+child workflow and an includable block. You can run each on its own (see its description).
+Which approach fits: `workflow:` + `fan_out:` when each item should be its own run, which
+can be inspected, paused or cancelled; `include:` + `fan_out:` when everything belongs in
+one run (the block cannot pause, and its copies share the checkout); a loop over an index,
+as in `kiro-nested-loop-groups`, when items must be handled one after another. A
+`workflow:` node cannot go inside a `loop_group`; Archon rejects it when the workflow loads.
 
 ## Configuration
 

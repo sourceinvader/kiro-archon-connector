@@ -1,0 +1,36 @@
+name: kiro-subworkflow
+description: |
+  Use when: checking that a `workflow:` node runs another workflow as its own child run on Kiro.
+  Does: starts kiro-step-child twice, one after the other. The second child run gets the first
+  one's output as its message, so it shows a value passing from one child run to the next. A
+  bash node then checks both results.
+  Each child run gets its own run record, transcript and cost line (see archon workflow runs).
+  Input: none. Run with
+    archon workflow run kiro-subworkflow --no-worktree
+  Output: prints SUBWORKFLOW-PASS.
+  Cost: 2 Kiro turns on minimax-m2.5.
+provider: kiro
+model: minimax-m2.5
+
+nodes:
+  - id: first
+    workflow: kiro-step-child
+    input: "Given a user is on the login page"
+
+  # depends_on chains the child runs. Two workflow: nodes that start in parallel both need
+  # the checkout, and Archon refuses the second one ("This worktree is in use") unless the
+  # child declares mutates_checkout: false, as kiro-step-child does.
+  - id: second
+    workflow: kiro-step-child
+    depends_on: [first]
+    input: "When they enter the credentials from this step: $first.output"
+
+  - id: check
+    depends_on: [second]
+    bash: |
+      a=$first.output
+      b=$second.output
+      printf 'first child run:  %s\nsecond child run: %s\n' "$a" "$b"
+      case "$a" in *STEP-OK*) ;; *) echo "SUBWORKFLOW-FAIL: first child run replied: $a"; exit 1 ;; esac
+      case "$b" in *STEP-OK*) ;; *) echo "SUBWORKFLOW-FAIL: second child run replied: $b"; exit 1 ;; esac
+      echo SUBWORKFLOW-PASS

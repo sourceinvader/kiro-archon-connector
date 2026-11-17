@@ -1,0 +1,54 @@
+name: kiro-fanout-include
+description: |
+  Use when: checking `include:` + `fan_out:` on Kiro, which runs a block once per item of an
+  array inside this run, with a loop_group in each copy.
+  Does: a bash node splits a Gherkin feature into its steps as a JSON array. An include: node
+  with fan_out runs kiro-gherkin-step-block once per step, up to 3 at a time. Each copy loops
+  until Kiro's rewrite of its step passes a check. The output is a JSON array of the results,
+  in the same order as the steps.
+  Unlike kiro-fanout-workflow, there are no child runs: everything is in this one run's
+  record and transcript. A block used this way cannot pause (no wait: nodes), and all copies
+  share the checkout, so use max_parallel: 1 if the block writes files.
+  Input: the run's message is the feature text, one step per line. Without a message it uses
+  a three-step login feature. For example:
+    archon workflow run kiro-fanout-include --no-worktree
+  Needs: jq.
+  Output: prints FANOUT-INCLUDE-PASS and each rewritten step.
+  Cost: 1-2 Kiro turns per step on minimax-m2.5.
+provider: kiro
+model: minimax-m2.5
+
+nodes:
+  - id: split
+    bash: |
+      feature=${ARGUMENTS:-}
+      if [ -z "$feature" ]; then
+        feature='Feature: Login
+        Scenario: Valid login
+          Given a user is on the login page
+          When they enter valid credentials
+          Then they see the dashboard'
+      fi
+      printf '%s\n' "$feature" \
+        | sed -nE 's/^[[:space:]]*((Given|When|Then|And|But)[[:space:]].*[^[:space:]])[[:space:]]*$/\1/p' \
+        | jq -R -s -c 'split("\n") | map(select(length > 0))'
+
+  - id: each-step
+    include: kiro-gherkin-step-block
+    depends_on: [split]
+    fan_out:
+      items: "$split.output"
+      as: statement            # each copy reads its item as $INPUTS.statement
+      max_parallel: 3
+
+  - id: check
+    depends_on: [each-step]
+    bash: |
+      steps=$split.output
+      results=$each-step.output
+      printf '%s' "$results" | jq -r '.[]'
+      want=$(printf '%s' "$steps" | jq length)
+      got=$(printf '%s' "$results" | jq '[.[] | strings | select(startswith("STEP-PASS"))] | length')
+      [ "$want" -gt 0 ] || { echo "FANOUT-INCLUDE-FAIL: no Given/When/Then lines in the message"; exit 1; }
+      [ "$got" = "$want" ] || { echo "FANOUT-INCLUDE-FAIL: $got of $want steps passed"; exit 1; }
+      echo "FANOUT-INCLUDE-PASS: $got steps"

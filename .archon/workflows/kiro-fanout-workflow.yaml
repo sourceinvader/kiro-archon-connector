@@ -1,0 +1,55 @@
+name: kiro-fanout-workflow
+description: |
+  Use when: checking `workflow:` + `fan_out:` on Kiro, which starts one child run per item of an
+  array.
+  Does: a bash node splits a Gherkin feature into its steps as a JSON array. A `workflow:` node
+  with fan_out then starts kiro-step-child once per step, up to 3 at a time. Its output is a
+  JSON array of the child runs' replies, in the same order as the steps. A bash node checks
+  that every step got a reply.
+  Use this when each item should be its own run, which you can inspect, pause or cancel on
+  its own. For one run with no child runs, see kiro-fanout-include.
+  Input: the run's message is the feature text, one step per line. Without a message it uses
+  a three-step login feature. For example:
+    archon workflow run kiro-fanout-workflow --no-worktree
+    archon workflow run kiro-fanout-workflow --no-worktree "$(cat features/login.feature)"
+  Needs: jq.
+  Output: prints FANOUT-WORKFLOW-PASS.
+  Cost: one Kiro turn per step on minimax-m2.5.
+provider: kiro
+model: minimax-m2.5
+
+nodes:
+  - id: split
+    bash: |
+      feature=${ARGUMENTS:-}
+      if [ -z "$feature" ]; then
+        feature='Feature: Login
+        Scenario: Valid login
+          Given a user is on the login page
+          When they enter valid credentials
+          Then they see the dashboard'
+      fi
+      printf '%s\n' "$feature" \
+        | sed -nE 's/^[[:space:]]*((Given|When|Then|And|But)[[:space:]].*[^[:space:]])[[:space:]]*$/\1/p' \
+        | jq -R -s -c 'split("\n") | map(select(length > 0))'
+
+  - id: each-step
+    workflow: kiro-step-child
+    depends_on: [split]
+    fan_out:
+      items: "$split.output"   # must be a JSON array; each item becomes the child's $ARGUMENTS
+      max_parallel: 3          # at most 3 child runs at once; it does not limit how many run
+      # join defaults to all_done: a failed child run fills its slot with
+      # { "archon_failed": true, ... } and the others still run.
+
+  - id: check
+    depends_on: [each-step]
+    bash: |
+      steps=$split.output
+      replies=$each-step.output
+      printf '%s' "$replies" | jq -r '.[]'
+      want=$(printf '%s' "$steps" | jq length)
+      got=$(printf '%s' "$replies" | jq '[.[] | strings | select(contains("STEP-OK"))] | length')
+      [ "$want" -gt 0 ] || { echo "FANOUT-WORKFLOW-FAIL: no Given/When/Then lines in the message"; exit 1; }
+      [ "$got" = "$want" ] || { echo "FANOUT-WORKFLOW-FAIL: $got of $want steps answered"; exit 1; }
+      echo "FANOUT-WORKFLOW-PASS: $got steps, one child run each"

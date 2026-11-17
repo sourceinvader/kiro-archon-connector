@@ -1,0 +1,22 @@
+name: kiro-step-child
+description: |
+  Use when: another workflow starts it with a `workflow:` node (kiro-subworkflow,
+  kiro-fanout-workflow). It also runs on its own.
+  Does: Kiro reads one Gherkin step and replies with one line, STEP-OK, the step's keyword,
+  and what the step checks.
+  Input: the run's message is the step, e.g.
+    archon workflow run kiro-step-child --no-worktree "Given a user is on the login page"
+  Writes nothing, so it declares mutates_checkout: false. That lets several of these child
+  runs share one checkout at the same time.
+provider: kiro
+model: minimax-m2.5
+mutates_checkout: false
+
+nodes:
+  - id: explain
+    prompt: |
+      Here is one Gherkin step:
+      $ARGUMENTS
+
+      Reply with exactly one line and nothing else, in this form:
+      STEP-OK <the step's first word> | <what the step sets up, does or checks, in at most 12 words>
