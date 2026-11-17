@@ -241,6 +241,13 @@ launch, because it is found through `~/.local/bin`. **[Tested]**
   (`~/.kiro/sessions`). **[Seen]**
 - `--resume-id <id>` restores the conversation and keeps the same session id in
   `runFinished`. The model recalled a code word from the previous turn. **[Tested]**
+- Resume also works when the next turn runs on a **different agent** (`--agent`). The
+  conversation carries over while the new agent's tools and skills apply: a turn on an
+  ephemeral agent with a skill, then a resumed turn on another ephemeral agent restricted
+  to `read`, recalled the code word. This was tested through Archon
+  (`kiro-session-probe`, check 2). **[Tested]**
+- There is **no fork**: nothing copies a session under a new id while leaving the
+  original untouched. `--resume-id` continues the same session. **[Seen]** in `--help`.
 - To tell "session gone" from other init failures without reading prose, check
   `chat --list-sessions --format json` in the same cwd: a `complete: true` list without the
   id means it no longer exists. **[Tested]**

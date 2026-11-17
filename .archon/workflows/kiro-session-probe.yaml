@@ -1,0 +1,125 @@
+name: kiro-session-probe
+description: |
+  Use when: checking that Kiro sessions carry over the way loop workflows need, before
+  relying on it.
+  Does: four checks, each followed by a bash node that prints SESSION-<check>-PASS or
+  exits 1 with SESSION-<check>-FAIL. Every check runs even if an earlier one failed.
+    1. SHARED: `context: shared` between two plain nodes (Kiro's default agent both times).
+    2. CROSS-AGENT: `context: shared` from a node with a skill to a node with
+       allowed_tools, so the two turns run on different ephemeral Kiro agents.
+    3. LOOP: a loop_group with fresh_context: false. Round 2 must remember the code word
+       Kiro made up in round 1; no prompt passes it on, so only the resumed session can.
+    4. LOOP-FRESH: the same loop with fresh_context: true must NOT remember it. This is
+       the control: it shows check 3 passes because of the session, not by luck.
+  Not covered: fork (`context: { resume: <node> }`). The plugin declares
+  sessionFork: false, because Kiro CLI cannot copy a session.
+  Needs: Archon >= 0.14.0 (on_exhausted).
+  Cost: 8 Kiro turns on minimax-m2.5 (0.25x credit rate).
+
+provider: kiro
+model: minimax-m2.5
+
+nodes:
+  # 1. Plain resume.
+  - id: shared-plant
+    context: fresh
+    prompt: "Remember the code word OSPREY-31 for later. Reply only: NOTED"
+  - id: shared-recall
+    depends_on: [shared-plant]
+    context: shared
+    prompt: "What was the code word I asked you to remember? Reply with the code word only."
+  - id: check-shared
+    depends_on: [shared-recall]
+    bash: |
+      out=$shared-recall.output
+      case "$out" in *OSPREY-31*) echo SESSION-SHARED-PASS ;; *) echo "SESSION-SHARED-FAIL: $out"; exit 1 ;; esac
+
+  # 2. Resume across ephemeral agents: a skill on one turn, a tool restriction on the next.
+  - id: cross-plant
+    depends_on: [check-shared]
+    trigger_rule: all_done
+    context: fresh
+    skills: [archon-signoff]
+    prompt: "Remember the code word HERON-58 for later. Reply only: NOTED"
+  - id: cross-recall
+    depends_on: [cross-plant]
+    context: shared
+    allowed_tools: [read]
+    prompt: "What was the code word I asked you to remember? Reply with the code word only."
+  - id: check-cross
+    depends_on: [cross-recall]
+    bash: |
+      out=$cross-recall.output
+      case "$out" in *HERON-58*) echo SESSION-CROSS-AGENT-PASS ;; *) echo "SESSION-CROSS-AGENT-FAIL: $out"; exit 1 ;; esac
+
+  # 3. Resume across loop_group rounds. Round 1 always starts a fresh session.
+  - id: loop-shared
+    depends_on: [check-cross]
+    trigger_rule: all_done
+    loop_group:
+      max_iterations: 2
+      fresh_context: false
+      on_exhausted: complete
+      until_bash: 'out=$shared-compare.output; case "$out" in *LOOP-VERDICT*) exit 0 ;; *) exit 1 ;; esac'
+      nodes:
+        - id: shared-say
+          prompt: |
+            Look at our conversation so far.
+            If you have not given me a code word earlier in this conversation, make up a
+            new one: an uncommon English word, a hyphen and a two-digit number, in capitals
+            (for example MARBLE-38, but not that one). Reply with exactly: WORD <code word>
+            If you did give me a code word earlier in this conversation, reply with
+            exactly: AGAIN <that same code word>
+        - id: shared-compare
+          depends_on: [shared-say]
+          bash: |
+            now=$shared-say.output
+            prev=$LOOP_PREV.shared-say.output
+            if [ -z "$prev" ]; then echo "round 1 said: $now"; exit 0; fi
+            word=$(printf '%s\n' "$prev" | grep -o 'WORD [A-Z]*-[0-9]*' | head -n 1 | cut -d' ' -f2)
+            if [ -n "$word" ] && printf '%s\n' "$now" | grep -q "AGAIN $word"; then
+              echo "LOOP-VERDICT remembered: round 1 said $word, round 2 said: $now"
+            else
+              echo "LOOP-VERDICT forgot: round 1 said: $prev / round 2 said: $now"
+            fi
+  - id: check-loop
+    depends_on: [loop-shared]
+    bash: |
+      out=$loop-shared.output
+      case "$out" in *"LOOP-VERDICT remembered"*) echo "SESSION-LOOP-PASS: $out" ;; *) echo "SESSION-LOOP-FAIL: $out"; exit 1 ;; esac
+
+  # 4. Control: with fresh_context: true, round 2 starts a new session and cannot remember.
+  - id: loop-fresh
+    depends_on: [check-loop]
+    trigger_rule: all_done
+    loop_group:
+      max_iterations: 2
+      fresh_context: true
+      on_exhausted: complete
+      until_bash: 'out=$fresh-compare.output; case "$out" in *LOOP-VERDICT*) exit 0 ;; *) exit 1 ;; esac'
+      nodes:
+        - id: fresh-say
+          prompt: |
+            Look at our conversation so far.
+            If you have not given me a code word earlier in this conversation, make up a
+            new one: an uncommon English word, a hyphen and a two-digit number, in capitals
+            (for example MARBLE-38, but not that one). Reply with exactly: WORD <code word>
+            If you did give me a code word earlier in this conversation, reply with
+            exactly: AGAIN <that same code word>
+        - id: fresh-compare
+          depends_on: [fresh-say]
+          bash: |
+            now=$fresh-say.output
+            prev=$LOOP_PREV.fresh-say.output
+            if [ -z "$prev" ]; then echo "round 1 said: $now"; exit 0; fi
+            word=$(printf '%s\n' "$prev" | grep -o 'WORD [A-Z]*-[0-9]*' | head -n 1 | cut -d' ' -f2)
+            if [ -n "$word" ] && printf '%s\n' "$now" | grep -q "AGAIN $word"; then
+              echo "LOOP-VERDICT remembered: round 1 said $word, round 2 said: $now"
+            else
+              echo "LOOP-VERDICT forgot: round 1 said: $prev / round 2 said: $now"
+            fi
+  - id: check-loop-fresh
+    depends_on: [loop-fresh]
+    bash: |
+      out=$loop-fresh.output
+      case "$out" in *"LOOP-VERDICT forgot"*) echo "SESSION-LOOP-FRESH-PASS: $out" ;; *) echo "SESSION-LOOP-FRESH-FAIL: $out"; exit 1 ;; esac

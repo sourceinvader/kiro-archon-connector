@@ -66,6 +66,7 @@ cheap `minimax-m2.5` model. Run them from this directory:
 | `kiro-playwright-mcp` | A browser-only node (`mcp: .archon/mcp/playwright.json`, `allowed_tools: []`) opens example.com and returns its title | completes, title `Example Domain` |
 | `kiro-playwright-cli` | A node with `skills: [playwright-cli]` drives the browser through `playwright-cli` shell commands | completes, title `Example Domain` (needs the setup below) |
 | `kiro-repo-summary` | A read-only node (`allowed_tools: [read]`) with `output_format` summarising the repository | completes, prints purpose and language |
+| `kiro-session-probe` | Session resume: `context: shared` between plain nodes and between nodes on different ephemeral agents, and a `loop_group` with `fresh_context: false` (round 2 remembers round 1) against `fresh_context: true` (it forgets). Needs Archon 0.14.0 | completes; prints `SESSION-SHARED-PASS`, `SESSION-CROSS-AGENT-PASS`, `SESSION-LOOP-PASS`, `SESSION-LOOP-FRESH-PASS` |
 | `kiro-bad-model` | How a configuration error surfaces | **fails** as `misconfigured` with Kiro's `InvalidModelError`, no retry |
 | `kiro-cancel-demo` | Cancelling a running node kills Kiro and its commands | see the steps in the workflow's description |
 
@@ -74,6 +75,7 @@ archon workflow run kiro-hello --no-worktree
 archon workflow run kiro-feature-tour --no-worktree      # needs bun on PATH (demo MCP server)
 archon workflow run kiro-playwright-mcp --no-worktree
 archon workflow run kiro-repo-summary --no-worktree
+archon workflow run kiro-session-probe --no-worktree       # needs Archon 0.14.0
 archon workflow run kiro-bad-model --no-worktree        # expected to fail
 
 # Playwright CLI: one-time setup in this repository, then run
@@ -138,6 +140,13 @@ Not supported (declared `false`, so Archon warns or refuses before spending anyt
 hooks, inline sub-agents, Archon's chat tools (`invoke_workflow`, `manage_run`; Archon's
 chat falls back to running `archon` commands through the shell), container execution,
 session fork (named `context: { resume: node }`), spend limits, fallback models.
+
+Without fork, a workflow with a named `context: { resume: node }` fails to load (`archon
+validate` names the node). That includes a `loop_group`'s named owner sessions. Plain
+resume covers the rest. `context: shared` works between any two Kiro nodes, even ones with
+different skills or tools. A `loop_group` with `fresh_context: false` (the default) keeps
+one Kiro session across rounds, so round 2 remembers round 1. `kiro-session-probe` checks
+all of this.
 
 ### MCP servers and skills in workflow nodes
 

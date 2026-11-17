@@ -135,7 +135,7 @@ A node needs exactly one of `prompt`, `command`, `bash`, `script`, `loop`, `appr
 | `depends_on` | Upstream ids. Nodes in one layer run concurrently. **[Docs]** |
 | `trigger_rule` | `all_success` (default), `one_success`, `none_failed_min_one_success`, `all_done` (run when every dependency is terminal, even failed). **[Docs]**, `all_done` **[Tested]** |
 | `when` | Condition, e.g. `"$classify.output.kind == 'bug'"`. **[Docs]** |
-| `context` | `fresh` (new session), `shared` (continue the ambient prior session in a sequential layer; rejected in parallel layers), `{ resume: node-id }` (fork that node's exact session; never falls back to a fresh one). **[Docs]**; `shared` **[Tested]** (the Kiro plugin resumes with `--resume-id`). Presumably `shared` needs `sessionResume` and named resume needs `sessionFork` **[Unverified]** |
+| `context` | `fresh` (new session), `shared` (continue the ambient prior session in a sequential layer; rejected in parallel layers), `{ resume: node-id }` (fork that node's exact session; never falls back to a fresh one). **[Docs]**; `shared` **[Tested]** (the Kiro plugin resumes with `--resume-id`, also across nodes on different ephemeral agents). Named resume needs `sessionFork`: on Kiro, `archon validate` reports `context.resume requires immutable session forks, but provider 'kiro' does not support sessionFork`, and `workflow run` refuses to load the file, so no turn is spent **[Tested]** |
 | `output_format` | JSON Schema; validated for every provider; best-effort providers are re-asked up to 3×; a node without schema-valid output **fails**. **[Docs]**; **[Tested]** |
 | `allowed_tools` / `denied_tools` | Tool allow/deny lists in the provider's vocabulary; `[]` = no tools; deny applies after allow. Not Codex. **[Docs]** |
 | `mcp` | Per-node MCP config file (section 6). **[Tested]** |
@@ -165,6 +165,31 @@ errors). **[Docs]**
 `archon validate workflows [name]` checks structure, substitutions, provider capability
 support (warning or error before any spend), MCP files and skills. Results look like
 `Results: 1 valid, 0 with errors, 1 with warnings`. **[Tested]**
+
+### Loops over several nodes (`loop_group`)
+
+A `loop_group` repeats a sealed body of nodes until `until_bash` exits 0 (or a prose
+`until:` marker appears), at most `max_iterations` rounds. The outer DAG sees one node.
+**[Docs]** What was tested with Kiro (`kiro-session-probe`, Archon 0.14.0):
+
+- `fresh_context: false` (the default) threads one Kiro session through the body and on
+  into the next round. Both rounds of the probe's loop reported the same `sess_…` id, and
+  round 2 recalled a code word that round 1 made up and no prompt passed on. **[Tested]**
+- `fresh_context: true` gives each round a new session (two different ids), and round 2
+  did not know round 1's word. Round 1 is always fresh, whatever comes before the
+  group. **[Tested]** (the engine seeds no cursor when `i === 1` **[Source]**)
+- `$LOOP_PREV.<node>.output` reaches the previous round only; it is empty in round 1.
+  `on_exhausted: complete` (0.14.0) lets a group that ran out of rounds complete with its
+  last output. The probe ended its loops through `until_bash` both times. **[Tested]**
+- A body node that fails fails the whole group immediately. So a body `bash:` node that
+  runs tests must exit 0 and report red or green in its output for `until_bash` to read.
+  **[Docs]**
+- Named owner sessions (`context: { resume: <pre-loop node> }` in the body) need
+  `sessionFork`, so they are unavailable on Kiro. **[Docs]** + the fork refusal above.
+- The CLI prints `Loop-group node '<id>' completed after N iterations`. Each `until_bash`
+  check appears in the transcript as an `exec_output` step named
+  `<group>-iteration-<n>`. Bash results are in the transcript's `stdout_tail`.
+  **[Seen]**
 
 ---
 
@@ -522,7 +547,7 @@ the model runs `archon …` commands itself. Plugin native tools run in the host
 
 - Why `archon validate` reported a missing skill as a warning rather than an error for a
   provider that declares `skillDiscovery`.
-- `persist_session`, loops, approvals, interactive waits and `workflow:` sub-runs were not
-  exercised with the Kiro provider.
+- `persist_session`, plain `loop:` nodes, approvals, interactive waits and `workflow:`
+  sub-runs were not exercised with the Kiro provider. `loop_group` was (section 4).
 - `archon serve` (web UI, server process) with the plugin was not tested; only the CLI.
 - Linux and Windows hosts were not tested.
