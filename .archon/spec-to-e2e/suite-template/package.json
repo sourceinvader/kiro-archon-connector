@@ -1,0 +1,15 @@
+{
+  "name": "acceptance-suite",
+  "private": true,
+  "description": "End-to-end acceptance tests generated from specs with playwright-bdd. Created by the kiro-spec-to-e2e workflow; see TRACEABILITY.md.",
+  "scripts": {
+    "lint:features": "for d in features/*/; do bash scripts/lint-features.sh \"$(basename \"$d\")\" || exit 1; done",
+    "test:ticket": "rm -rf .features-gen && bddgen --tags \"@$TICKET and not @app-mismatch and not @unreachable and not @needs-test-hook and not @unexplored and not @flagged\" && playwright test --retries=0",
+    "test:suite": "rm -rf .features-gen && bddgen --tags \"not @app-mismatch and not @unreachable and not @needs-test-hook and not @unexplored and not @flagged and not @journey\" && playwright test --retries=0",
+    "matrix": "bash scripts/matrix.sh > TRACEABILITY.md"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.65.1",
+    "playwright-bdd": "9.2.1"
+  }
+}

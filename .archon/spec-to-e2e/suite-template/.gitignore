@@ -1,0 +1,9 @@
+node_modules/
+.features-gen/
+reports/
+test-results/
+playwright-report/
+# Logged-in browser state (storageState); holds session cookies
+.auth/
+# Screenshots taken while exploring; the text evidence is committed
+evidence/**/*.png

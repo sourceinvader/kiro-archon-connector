@@ -8,3 +8,6 @@ coverage/
 # Playwright output directories (may contain credentials or screenshots)
 .playwright-cli/
 .playwright-mcp/
+
+# Suite written by a trial run of kiro-spec-to-e2e in this repository
+/acceptance/

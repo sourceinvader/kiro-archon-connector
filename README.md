@@ -73,6 +73,7 @@ cheap `minimax-m2.5` model, except `kiro-gherkin-playwright-loop`, which pins th
 | `kiro-fanout-workflow` | `workflow:` + `fan_out:`: splits a Gherkin feature into its steps (a JSON array) and starts one `kiro-step-child` run per step, 3 at a time. Needs jq | completes, prints `FANOUT-WORKFLOW-PASS` |
 | `kiro-fanout-include` | `include:` + `fan_out:`: runs the block `kiro-gherkin-step-block` (a `loop_group` that rewrites a step until a check passes) once per step, inside this one run with no child runs. Needs jq | completes, prints `FANOUT-INCLUDE-PASS` and each rewritten step |
 | `kiro-nested-loop-groups` | A `loop_group` inside a `loop_group`: the outer loop walks an array one step per round, the inner one runs two Kiro rounds per step. Needs jq | completes, prints `NESTED-LOOP-PASS` |
+| `kiro-spec-to-e2e` | One spec folder (linked to a Jira ticket) → tagged Gherkin, checked in the browser through Playwright MCP, then playwright-bdd step definitions run 3× with no retries behind anti-cheat gates; the feature is revised when the same step keeps failing. Jira and Confluence nodes are stubs. Design notes: [SPEC-TO-E2E.md](SPEC-TO-E2E.md). Needs Archon 0.14.0, Node.js, jq; about 35 minutes | completes, prints `SPEC-TO-E2E <status> TODO-101` (`done` in the trial run, with 3 scenarios left for review) |
 | `kiro-bad-model` | How a configuration error surfaces | **fails** as `misconfigured` with Kiro's `InvalidModelError`, no retry |
 | `kiro-cancel-demo` | Cancelling a running node kills Kiro and its commands | see the steps in the workflow's description |
 
@@ -88,6 +89,9 @@ archon workflow run kiro-fanout-workflow --no-worktree     # one child run per G
 archon workflow run kiro-fanout-workflow --no-worktree "$(cat my.feature)"
 archon workflow run kiro-fanout-include --no-worktree      # one block copy per step, one run
 archon workflow run kiro-nested-loop-groups --no-worktree
+archon workflow run kiro-spec-to-e2e --no-worktree \
+  --input spec_dir=.archon/spec-to-e2e/example-specs/TODO-101-todo-items \
+  --input base_url=https://demo.playwright.dev/todomvc/   # writes acceptance/ into your checkout
 
 # Playwright CLI: one-time setup in this repository, then run
 npm install -g @playwright/cli@latest
@@ -328,6 +332,7 @@ answers `initialize` on Ubuntu 26.04.
 INSTALL.md                install Archon and this plugin, step by step
 KIRO-LEARNINGS.md         field notes on Kiro CLI
 ARCHON-LEARNINGS.md       field notes on Archon
+SPEC-TO-E2E.md            design notes: spec files → Gherkin → Playwright tests (kiro-spec-to-e2e)
 archon-plugin.json        provider manifest (executable archon-provider-kiro)
 src/main.ts               plugin entry: serveProvider over stdio
 src/provider.ts           IAgentProvider: turns, credentials, models, diagnostics
@@ -344,6 +349,7 @@ src/descriptor.ts         descriptor and capabilities
 vendor/provider-contract  Archon's provider contract v0.14.0, vendored (not on npm yet)
 .archon/workflows/        sample workflows
 .archon/mcp/              MCP configs the samples use (Playwright, demo secret server)
+.archon/spec-to-e2e/      kiro-spec-to-e2e's scripts, suite template, driver and example spec
 .kiro/skills/             demo skill used by kiro-feature-tour
 scripts/                  build, local install, fixture recording
 e2e/                      real-Archon end-to-end driver

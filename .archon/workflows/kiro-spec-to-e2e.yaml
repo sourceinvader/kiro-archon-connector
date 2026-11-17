@@ -1,0 +1,788 @@
+name: kiro-spec-to-e2e
+description: |
+  Use when: turning one specification folder, linked to one Jira ticket, into Gherkin
+  feature files and playwright-bdd tests that pass against a running dev server. Run it
+  once per spec folder; .archon/spec-to-e2e/bin/run-all.sh walks a whole folder of specs.
+  Does: works out the ticket ID from the folder (bash, no AI), reads the Jira ticket
+  (UNIMPLEMENTED stub), and has Kiro write the end-to-end-testable behaviours as tagged
+  Gherkin. An outer loop_group (a draft plus at most 2 revisions) then:
+    - checks every scenario in a real browser through Playwright MCP, and tags the ones
+      the app does not match (bash writes the tags, not the model);
+    - freezes the feature files;
+    - runs an inner loop_group (at most 3 attempts): Kiro writes step definitions, bash
+      runs them 3 times with no retries behind anti-cheat gates;
+    - when the same Gherkin step fails in every attempt, however the code was rewritten,
+      Kiro revises the feature (how a step is checked, never the expected values; a bash
+      check undoes any edit that changes them) and the round starts again.
+  Then a bash node writes the ticket's state file and TRACEABILITY.md, and, with
+  commit=yes, commits the ticket's files. Design, reasoning and concerns: SPEC-TO-E2E.md.
+  NOT for: long multi-screen journeys (see SPEC-TO-E2E.md), or a dev server you cannot
+  reach from this machine.
+  Input:
+    spec_dir       (required) one spec folder, e.g. specs/PROJ-123-checkout
+    base_url       (required) the dev server, e.g. https://dev.example.com/
+    suite_dir      where the test suite lives in this repository (default: acceptance)
+    jira_projects  Jira project keys allowed in ticket IDs, e.g. PROJ|CORE (default: any)
+    commit         yes to commit the ticket's files at the end (default: no)
+  Try it on the bundled example spec and the public TodoMVC demo:
+    archon workflow run kiro-spec-to-e2e --no-worktree \
+      --input spec_dir=.archon/spec-to-e2e/example-specs/TODO-101-todo-items \
+      --input base_url=https://demo.playwright.dev/todomvc/
+  Output: in the suite, features/<TICKET>/, steps/<TICKET>/, evidence/<TICKET>/,
+  state/<TICKET>.json and TRACEABILITY.md. The last line printed is
+  SPEC-TO-E2E <done|no-e2e|needs-human|flagged|error> <TICKET>.
+  Needs: Archon >= 0.14.0, Node.js 20+ with npm, jq, network access to the dev server
+  and the npm registry, and --no-worktree (the suite is meant to live in your checkout).
+  Cost: 4-6 Kiro turns on minimax-m2.5 when the first round goes green; at most 16.
+provider: kiro
+model: minimax-m2.5
+
+inputs:
+  spec_dir:
+    required: true
+    description: one spec folder, e.g. specs/PROJ-123-checkout
+  base_url:
+    required: true
+    description: the dev server the scenarios are checked against
+  suite_dir:
+    default: acceptance
+    description: the test suite's folder in this repository
+  jira_projects:
+    default: any
+    description: Jira project keys a ticket ID may use, as a regex such as PROJ|CORE
+  commit:
+    default: "no"
+    description: yes commits the ticket's files when the run ends
+
+nodes:
+  # The ticket ID decides every path and tag, so it is worked out by a script, not a model.
+  # The folder name wins, then a TICKET file, then the only ticket ID the files mention.
+  - id: resolve
+    bash: |
+      set -eu
+      S="$ARTIFACTS_DIR/spec-to-e2e"
+      mkdir -p "$S"
+      info=$(bash .archon/spec-to-e2e/bin/resolve-ticket.sh "$INPUTS_SPEC_DIR" "$INPUTS_JIRA_PROJECTS")
+      printf '%s' "$info" \
+        | jq -c --arg suite "$INPUTS_SUITE_DIR" --arg base_url "$INPUTS_BASE_URL" \
+            '. + {suite: $suite, base_url: $base_url}' \
+        | tee "$S/resolve.json"
+
+  # UNIMPLEMENTED: reads the ticket from Jira. Replace this stub with a Kiro node that has
+  # the Jira MCP server and no other tools, for example:
+  #   mcp: .archon/mcp/jira.json
+  #   allowed_tools: []
+  #   prompt: Read Jira issue $resolve.output.ticket and its linked issues. Copy, do not summarise.
+  #   output_format: the same fields as below, required, additionalProperties: false
+  # or with a bash node that calls the Jira REST API with a token from the environment.
+  # Keep the field names: extract reads them, and "implemented" tells it to use the spec alone.
+  - id: jira
+    depends_on: [resolve]
+    bash: |
+      ticket=$resolve.output.ticket
+      jq -cn --arg key "$ticket" '{implemented: false, key: $key, summary: "", description: "",
+        acceptance_criteria: [], linked_issues: [], fix_version: "", status: ""}'
+
+  # Creates the suite the first time (package.json with pinned versions, playwright.config.ts,
+  # .gitignore, lint scripts) without overwriting anything that exists, then installs it.
+  - id: setup
+    depends_on: [resolve]
+    timeout: 900000
+    bash: |
+      set -eu
+      suite=$INPUTS_SUITE_DIR
+      tpl=.archon/spec-to-e2e/suite-template
+      mkdir -p "$suite/features" "$suite/steps" "$suite/evidence" "$suite/state"
+      (cd "$tpl" && find . -type f | sed 's|^\./||') | while IFS= read -r f; do
+        if [ ! -e "$suite/$f" ]; then
+          mkdir -p "$suite/$(dirname "$f")"
+          cp "$tpl/$f" "$suite/$f"
+          echo "created $suite/$f"
+        fi
+      done
+      cd "$suite"
+      [ -d node_modules/playwright-bdd ] || npm install --no-audit --no-fund --loglevel=error >&2
+      npx --no-install playwright install chromium >&2
+      # Kiro gives an MCP server 30 seconds to start; warm the npx cache so it never downloads then.
+      npx -y @playwright/mcp@0.0.85 --help >/dev/null 2>&1 || true
+      echo "suite ready in $suite"
+
+  # Kiro reads the spec (and the Jira ticket, once that node is real) and writes the draft
+  # feature files plus the list of what it left out and why.
+  - id: extract
+    depends_on: [jira, setup]
+    allowed_tools: [read, write, shell]
+    prompt: |
+      You turn one specification into Gherkin scenarios that can be checked end to end in a
+      browser against the running application. These scenarios become automated tests that
+      people will rely on for a long time, so being exact matters more than covering a lot.
+
+      Ticket: $resolve.output.ticket
+      Specification: every file in the folder $INPUTS.spec_dir
+      Jira ticket as JSON ("implemented": false means it was not fetched; use the spec alone):
+      $jira.output
+      Suite folder: $INPUTS.suite_dir (the paths below are inside it)
+
+      1. Read the whole specification and list every requirement it states.
+      2. Keep only what a user can see or do in a browser: a page, a control, a message, a
+         value on screen, a change that survives a reload. Leave out internals (ids, storage
+         formats, performance figures, code structure, APIs no user sees).
+      3. Write what you kept as Gherkin in features/$resolve.output.ticket/<short-kebab-name>.feature,
+         one Feature per area and at most 8 scenarios per file. If that folder already has
+         feature files from an earlier run, update them rather than starting again, and keep
+         the names of scenarios that still match the spec.
+      4. If evidence/$resolve.output.ticket/emergent.md exists, add every line ticked "- [x]"
+         as a scenario tagged @emergent @origin-$resolve.output.ticket instead of @$resolve.output.ticket.
+      5. Write evidence/$resolve.output.ticket/not-e2e.md: one line per requirement you left
+         out, giving where it is in the spec, what it says, and why it cannot be checked in a browser.
+
+      Shape every feature file like this:
+
+          # spec: <the spec folder>
+          @$resolve.output.ticket
+          Feature: <area>
+
+            # source: <file>, <section or item number>
+            @$resolve.output.ticket
+            Scenario: <one behaviour, named after its outcome>
+              Given <the state the behaviour starts from>
+              When <the one action>
+              Then <what the user sees, with the expected value in double quotes>
+
+      Rules (scripts/lint-features.sh checks most of them):
+      - One behaviour per scenario: exactly one When. Several outcomes of that one action
+        are fine as Then and And steps.
+      - Given describes a state, not clicks: 'Given the list has the todo "Buy milk"', not
+        'Given I type "Buy milk" and press Enter'. The tests set the state up the fastest way.
+      - Every Then quotes the exact expected value from the spec: Then the footer shows "2 items left".
+      - Use the interface's own words (labels, buttons, messages) wherever the spec gives them.
+      - Each scenario stands alone: none may rely on another having run first.
+      - The tag line sits directly above its Scenario line, the "# source:" comment above the
+        tag line. Use no other tags (no @skip, @only, @fail, @fixme, @slow).
+      - Do not invent behaviour the spec does not state. Leave it out and say so in not-e2e.md.
+
+      When you are done, run
+        cd $INPUTS.suite_dir && bash scripts/lint-features.sh $resolve.output.ticket
+      and fix the files until it prints LINT-OK.
+
+      If nothing in the specification can be checked in a browser, write no feature file,
+      still write not-e2e.md, and answer with verdict "no-e2e".
+    output_format:
+      type: object
+      properties:
+        verdict:
+          type: string
+          enum: [testable, no-e2e]
+        feature_files:
+          type: array
+          items:
+            type: string
+        scenarios:
+          type: integer
+        left_out:
+          type: integer
+      required: [verdict, feature_files, scenarios, left_out]
+      additionalProperties: false
+
+  # Also writes the verdict to a file, so the finish node can tell "nothing to test" from
+  # "extract never finished" without reading a node that may not have run.
+  - id: extract-verdict
+    depends_on: [extract]
+    bash: |
+      verdict=$extract.output.verdict
+      printf '%s' "$verdict" > "$ARTIFACTS_DIR/spec-to-e2e/extract-verdict"
+      printf '%s' "$verdict"
+
+  # One round: lint, check in the browser, freeze, write and run the tests, decide.
+  # Round 1 tests the draft; rounds 2 and 3 test a revised feature. Each round starts a new
+  # Kiro session (fresh_context: true): what a round needs from the last one is passed
+  # explicitly, which keeps long browser sessions from piling up.
+  - id: rounds
+    depends_on: [extract-verdict]
+    when: "$extract-verdict.output == 'testable'"
+    loop_group:
+      max_iterations: 3          # 1 draft + 2 revisions; keep max_rounds in classify equal
+      until_bash: 'out=$round-end.output; case "$out" in *ROUND-STOP*) exit 0 ;; *) exit 1 ;; esac'
+      on_exhausted: complete
+      fresh_context: true
+      nodes:
+        # Counts the round and runs the same lint the model was told to run. A feature that
+        # still fails it fails the run: the finish node records the ticket as flagged.
+        - id: lint
+          bash: |
+            S="$ARTIFACTS_DIR/spec-to-e2e"
+            k=$(( $(cat "$S/round" 2>/dev/null || echo 0) + 1 ))
+            echo "$k" > "$S/round"
+            mkdir -p "$S/round-$k"
+            ticket=$resolve.output.ticket
+            cd "$INPUTS_SUITE_DIR" || exit 1
+            if out=$(bash scripts/lint-features.sh "$ticket" 2>&1); then
+              printf 'round %s: %s\n' "$k" "$out"
+            else
+              printf 'round %s\n%s\n' "$k" "$out" | tee "$S/lint-failed"
+              exit 1
+            fi
+
+        # Checks every scenario on the dev server before any test code exists, and collects
+        # the evidence the step definitions are written from. Browser and file reading only.
+        - id: explore
+          depends_on: [lint]
+          mcp: .archon/mcp/playwright.json
+          allowed_tools: [read]
+          prompt: |
+            You check Gherkin scenarios against the running application in a real browser,
+            before anyone writes test code for them. You do not write or change any file.
+
+            Application (dev server): $INPUTS.base_url
+            Ticket: $resolve.output.ticket
+            Feature files: every .feature file in $INPUTS.suite_dir/features/$resolve.output.ticket/
+            Why the last round stopped, if this is a revision (empty in round 1):
+            $LOOP_PREV.classify.output
+
+            For every Scenario, and every Examples row of a Scenario Outline:
+            1. Bring the app into the state its Given steps describe. If that needs data,
+               create it with a name starting "e2e-" so it can be told apart. Never change or
+               delete data you did not create.
+            2. Do what its When step says.
+            3. Compare each Then step with what the page really shows.
+            Then give the scenario one status:
+            - confirmed: every step worked and every Then matched exactly.
+            - app-mismatch: the steps worked, but the app shows something other than a Then
+              expects. Do not decide which one is right; record what the app showed.
+            - unreachable: you could not get to the screen or do the action.
+            - needs-test-hook: the Given cannot be set up from the UI or from a request the
+              app makes (time passing, a third party calling back, a background job).
+            For each scenario also record:
+            - observed: the exact visible text you saw for each Then step.
+            - locators: every element you used, as a Playwright locator by role and
+              accessible name, label or text, e.g. getByRole('button', { name: 'Add' }).
+            - setup_calls: the requests the app itself made that create or change the state
+              the Given needs, as "METHOD /path" from the browser's network requests, so tests
+              can set the state up without clicking. Empty if there were none.
+            - note: anything a test writer needs to know (waits, animations, dialogs).
+            Under "emergent", list up to 5 behaviours you noticed that users would rely on but
+            no scenario covers (validation messages, empty states, ordering). Do not test them.
+            "app_build": the app's version or build if the UI shows one, otherwise "unknown".
+
+            Use the scenario names exactly as written in the feature files. Close the browser
+            when you are done.
+          output_format:
+            type: object
+            properties:
+              scenarios:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    name:
+                      type: string
+                    status:
+                      type: string
+                      enum: [confirmed, app-mismatch, unreachable, needs-test-hook]
+                    observed:
+                      type: string
+                    locators:
+                      type: array
+                      items:
+                        type: string
+                    setup_calls:
+                      type: array
+                      items:
+                        type: string
+                    note:
+                      type: string
+                  required: [name, status, observed, locators, setup_calls, note]
+                  additionalProperties: false
+              emergent:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    title:
+                      type: string
+                    observed:
+                      type: string
+                  required: [title, observed]
+                  additionalProperties: false
+              app_build:
+                type: string
+            required: [scenarios, emergent, app_build]
+            additionalProperties: false
+
+        # Saves the evidence, tags scenarios the browser check did not confirm (so the test
+        # run leaves them out), adds new emergent candidates to emergent.md, and freezes the
+        # feature files: from here until the round ends, only steps/<TICKET>/ may change.
+        - id: record
+          depends_on: [explore]
+          bash: |
+            set -u
+            S="$ARTIFACTS_DIR/spec-to-e2e"
+            k=$(cat "$S/round")
+            d="$S/round-$k"
+            ticket=$resolve.output.ticket
+            explore=$explore.output
+            suite=$INPUTS_SUITE_DIR
+            bin="$PWD/.archon/spec-to-e2e/bin"
+            fdir="$suite/features/$ticket"
+            ev="$suite/evidence/$ticket"
+            mkdir -p "$ev"
+            printf '%s' "$explore" | jq '.' > "$ev/explore.json" || exit 1
+            cp "$ev/explore.json" "$d/explore.json"
+
+            # The status of every scenario in the files; one the browser check skipped is unexplored.
+            grep -hE '^[[:space:]]*Scenario( Outline)?:' "$fdir"/*.feature \
+              | sed -E 's/^[[:space:]]*Scenario( Outline)?:[[:space:]]*//; s/[[:space:]]+$//' > "$d/names.txt"
+            printf '%s' "$explore" | jq -r '.scenarios | group_by(.name)[]
+              | [.[0].name, ((map(.status) | map(select(. != "confirmed")) | .[0]) // "confirmed")] | @tsv' > "$d/reported.tsv"
+            : > "$d/status.tsv"
+            confirmed=0
+            excluded=0
+            while IFS= read -r name; do
+              st=$(awk -F'\t' -v n="$name" '$1 == n { print $2; exit }' "$d/reported.tsv")
+              [ -n "$st" ] || st=unexplored
+              if [ "$st" = confirmed ]; then
+                confirmed=$((confirmed + 1))
+              else
+                excluded=$((excluded + 1))
+                printf '%s\t%s\n' "$name" "$st" >> "$d/status.tsv"
+              fi
+            done < "$d/names.txt"
+            bash "$bin/apply-status.sh" "$fdir" "$d/status.tsv"
+
+            if [ ! -f "$ev/emergent.md" ]; then
+              {
+                echo "# Emergent behaviour seen while checking $ticket"
+                echo
+                echo "Seen in the app during the browser check, not stated in the spec. Tick a line"
+                echo "(- [x]) and the next run of $ticket adds it as an @emergent @origin-$ticket scenario."
+                echo
+              } > "$ev/emergent.md"
+            fi
+            printf '%s' "$explore" | jq -r '.emergent[] | [.title, .observed] | @tsv' \
+              | while IFS=$'\t' read -r title observed; do
+                  grep -qF -- "] $title — " "$ev/emergent.md" \
+                    || printf -- '- [ ] %s — %s\n' "$title" "$observed" >> "$ev/emergent.md"
+                done
+
+            (cd "$suite" && bash "$bin/freeze-list.sh" "$ticket") > "$S/frozen.list"
+            rm -rf "$S/frozen"
+            cp -R "$fdir" "$S/frozen"
+            bash "$bin/then-values.sh" "$S/frozen" > "$S/then-values.txt"
+            jq -cn --argjson round "$k" --argjson confirmed "$confirmed" --argjson excluded "$excluded" \
+              '{round: $round, confirmed: $confirmed, excluded: $excluded}'
+
+        # Write step definitions, run them, repeat. Skipped when the browser check confirmed
+        # nothing, which the classify node reports for a person to look at.
+        - id: tests
+          depends_on: [record]
+          when: "$record.output.confirmed > 0"
+          loop_group:
+            max_iterations: 3
+            until_bash: 'out=$run-tests.output; case "$out" in *TESTS-GREEN*) exit 0 ;; *) exit 1 ;; esac'
+            on_exhausted: complete
+            nodes:
+              - id: write-steps
+                mcp: .archon/mcp/playwright.json
+                allowed_tools: [read, write, shell]
+                prompt: |
+                  Write playwright-bdd step definitions so that ticket $resolve.output.ticket's
+                  scenarios pass against the dev server $INPUTS.base_url.
+
+                  Suite folder: $INPUTS.suite_dir (the paths below are inside it)
+                  Feature files: features/$resolve.output.ticket/ (frozen: do not edit them)
+                  Browser evidence for each scenario (locators, observed texts, setup requests):
+                    evidence/$resolve.output.ticket/explore.json
+                  Result of your last attempt (empty on the first one):
+                  $LOOP_PREV.run-tests.output
+
+                  Rules:
+                  - Write TypeScript files only in steps/$resolve.output.ticket/, named
+                    <area>.steps.ts. Every other file in the suite is frozen; changing one
+                    fails the attempt.
+                  - Start each file with
+                      import { expect } from '@playwright/test';
+                      import { createBdd } from 'playwright-bdd';
+                      const { Given, When, Then } = createBdd();
+                  - Before defining a step, search steps/ for one with the same text and reuse
+                    it. The same text defined twice fails test generation (ambiguous step).
+                  - Never write the server's address in the code: tests run with baseURL set
+                    from BASE_URL. Navigate with paths relative to it and no leading slash,
+                    e.g. page.goto('./') or page.goto('orders/new').
+                  - Use the locators from the evidence: getByRole, getByLabel, getByText. Use CSS
+                    selectors only when the evidence shows nothing else works. Scope a locator
+                    to its region (the footer, a list item) when the same text can appear elsewhere.
+                  - Every Then asserts with expect() on the value passed in from the Gherkin
+                    ({string}, {int}), never a copy of the value typed into the code. A step
+                    that takes a value must use it: "the todo {string} is completed" checks
+                    that todo, not whichever one happens to be first.
+                  - Given steps set state up the fastest reliable way: the setup requests in the
+                    evidence through the request fixture, otherwise the UI. Give anything you
+                    create a unique name (add Date.now()), because each scenario runs 3 times.
+                  - Forbidden, and checked: test.skip/fixme/fail/only, expect.soft, try/catch,
+                    .catch(, waitForTimeout, tags: options on steps, and http:// or https:// URLs.
+                  - Fix what the last attempt reported. If one step failed, look at that
+                    element on the live page with the browser before changing its code.
+
+                  You may check your work with
+                    cd $INPUTS.suite_dir && bash scripts/lint-steps.sh $resolve.output.ticket \
+                      && rm -rf .features-gen && npx bddgen --tags '@$resolve.output.ticket' \
+                      && BASE_URL='$INPUTS.base_url' npx playwright test --retries=0
+                  Close the browser when you are done. Reply with the files you wrote and one
+                  line on what you changed since the last attempt.
+
+              # The deterministic judge. Must exit 0 even when tests fail (a failed body node
+              # fails the whole loop), so it reports TESTS-GREEN or TESTS-RED instead, and
+              # saves each attempt's result for the classify node.
+              - id: run-tests
+                depends_on: [write-steps]
+                timeout: 1200000
+                bash: |
+                  set -u
+                  S="$ARTIFACTS_DIR/spec-to-e2e"
+                  k=$(cat "$S/round")
+                  d="$S/round-$k"
+                  n=$(( $(ls "$d"/tests-*.json 2>/dev/null | wc -l) + 1 ))
+                  ticket=$resolve.output.ticket
+                  bin="$PWD/.archon/spec-to-e2e/bin"
+                  cd "$INPUTS_SUITE_DIR" || exit 1
+                  save() {
+                    jq -cn --argjson attempt "$n" --arg gate "$1" --argjson green "$2" --argjson report "$3" \
+                      '{attempt: $attempt, gate: $gate, green: $green, report: $report}' > "$d/tests-$n.json"
+                  }
+                  red() { save "$1" false "${2:-null}"; echo "TESTS-RED (round $k, attempt $n)"; exit 0; }
+
+                  # Gate 1: nothing frozen changed (feature files, other steps, config).
+                  if ! bash "$bin/freeze-list.sh" "$ticket" | diff "$S/frozen.list" - > "$d/frozen-diff-$n.txt"; then
+                    echo "GATE frozen: only steps/$ticket/ may change while tests are written. Changed:"
+                    grep -E '^[<>]' "$d/frozen-diff-$n.txt" | awk '{ print $NF }' | LC_ALL=C sort -u
+                    red frozen
+                  fi
+                  # Gate 2: no skipped, inverted or swallowed failures in the step code.
+                  if ! out=$(bash scripts/lint-steps.sh "$ticket" 2>&1); then
+                    echo "GATE lint-steps:"
+                    printf '%s\n' "$out"
+                    red lint-steps
+                  fi
+                  # Gate 3: generate the tests from the feature files. Undefined or ambiguous
+                  # steps fail here. Regenerating every time means a stale test never runs.
+                  tags="@$ticket and not @app-mismatch and not @unreachable and not @needs-test-hook and not @unexplored and not @flagged"
+                  rm -rf .features-gen reports/cucumber.json test-results
+                  if ! out=$(npx --no-install bddgen --tags "$tags" 2>&1); then
+                    echo "GATE bddgen (undefined or ambiguous steps):"
+                    printf '%s\n' "$out" | tail -n 40
+                    red bddgen
+                  fi
+                  # The run: every scenario 3 times, no retries. baseURL ends in / so that
+                  # relative paths such as './' stay under it.
+                  base_url="${INPUTS_BASE_URL%/}/"
+                  out=$(env -u NO_COLOR -u FORCE_COLOR BASE_URL="$base_url" PLAYWRIGHT_HTML_OPEN=never \
+                    npx --no-install playwright test --repeat-each=3 --retries=0 2>&1)
+                  code=$?
+                  printf '%s\n' "$out" | tail -n 25
+                  if [ ! -s reports/cucumber.json ]; then
+                    echo "GATE report: playwright wrote no reports/cucumber.json"
+                    red report
+                  fi
+                  cp reports/cucumber.json "$d/cucumber-$n.json"
+                  rep=$(bash "$bin/test-report.sh" reports/cucumber.json) || red report
+                  execs=$(printf '%s' "$rep" | jq '.executions')
+                  echo "--- $execs scenario runs: $(printf '%s' "$rep" | jq -r '.first_bad | to_entries | map("\(.value) \(.key)") | join(", ")')"
+                  printf '%s' "$rep" | jq -r '.failing | group_by(.step)[]
+                    | "FAILED \(length)x \(.[0].step)  \(.[0].text)  [\(.[0].kind)]\n  "
+                      + (.[0].error | split("\n") | map(select(test("\\S"))) | .[0:4] | join("\n  "))'
+                  # Gate 4: a step that ended skipped, pending, undefined or ambiguous did not run.
+                  bad=$(printf '%s' "$rep" | jq -r '.first_bad | keys - ["passed", "failed"] | join(", ")')
+                  if [ -n "$bad" ]; then
+                    echo "GATE report: steps ended as $bad, so they did not really run"
+                    red report "$rep"
+                  fi
+                  allpass=$(printf '%s' "$rep" | jq '.first_bad | keys == ["passed"]')
+                  if [ "$code" -eq 0 ] && [ "$execs" -gt 0 ] && [ $((execs % 3)) -eq 0 ] && [ "$allpass" = true ]; then
+                    save "" true "$rep"
+                    echo "TESTS-GREEN ($execs scenario runs, round $k, attempt $n)"
+                  else
+                    red "" "$rep"
+                  fi
+
+        # Decides what the round's attempts mean. Reads only files, so it also runs when the
+        # tests loop was skipped (trigger_rule: all_done).
+        #   done    the last attempt was green
+        #   revise  the same Gherkin step failed in every attempt that ran, however the code
+        #           was rewritten: the step itself may be wrong (or the app disagrees)
+        #   stop    anything else: failures moved around (the test code is the problem), a
+        #           rule was broken, nothing was confirmed, or no revisions are left
+        - id: classify
+          depends_on: [record, tests]
+          trigger_rule: all_done
+          bash: |
+            set -u
+            S="$ARTIFACTS_DIR/spec-to-e2e"
+            k=$(cat "$S/round")
+            d="$S/round-$k"
+            max_rounds=3
+            emit() {
+              jq -cn --argjson round "$k" --arg verdict "$1" --arg reason "$2" \
+                --arg step "${3:-}" --arg text "${4:-}" --arg kind "${5:-}" --arg error "${6:-}" \
+                '{round: $round, verdict: $verdict, reason: $reason, step: $step, text: $text, kind: $kind, error: $error}' \
+                | tee "$d/verdict.json"
+              exit 0
+            }
+            ls "$d"/tests-*.json >/dev/null 2>&1 || emit stop no-confirmed-scenarios
+            attempts=$(jq -s 'sort_by(.attempt)' "$d"/tests-*.json)
+            [ "$(printf '%s' "$attempts" | jq '.[-1].green')" = true ] && emit done green
+            last_gate=$(printf '%s' "$attempts" | jq -r '.[-1].gate')
+            case "$last_gate" in frozen|lint-steps) emit stop "steps-rule-broken-$last_gate" ;; esac
+
+            ran=$(printf '%s' "$attempts" | jq '[.[] | select(.gate == "" and .report != null)]')
+            nran=$(printf '%s' "$ran" | jq 'length')
+            [ "$nran" -eq 0 ] && emit stop tests-never-ran
+            same=$(printf '%s' "$ran" | jq -r '
+              map([.report.failing[].step | select(startswith("hook:") | not)] | unique) as $sets
+              | $sets[0][] | select(. as $x | all($sets[]; any(.[]; . == $x)))' | head -n 1)
+            if [ "$nran" -ge 2 ] && [ -n "$same" ]; then
+              info=$(printf '%s' "$ran" | jq -c --arg s "$same" '[.[].report.failing[] | select(.step == $s)] | last')
+              text=$(printf '%s' "$info" | jq -r '.text')
+              kind=$(printf '%s' "$info" | jq -r '.kind')
+              error=$(printf '%s' "$info" | jq -r '.error')
+              if [ "$k" -lt "$max_rounds" ]; then
+                emit revise same-step "$same" "$text" "$kind" "$error"
+              else
+                emit stop revisions-exhausted "$same" "$text" "$kind" "$error"
+              fi
+            fi
+            emit stop failures-moved
+
+        # Revises the feature when classify says so; otherwise answers "none" at once. It runs
+        # every round so that round-end never has to read a skipped node.
+        - id: revise
+          depends_on: [classify]
+          allowed_tools: [read, write, shell]
+          prompt: |
+            Verdict on this round's tests:
+            $classify.output
+
+            If "verdict" above is not "revise", answer with action "none" and an empty
+            summary straight away. Do not read or change any file.
+
+            Otherwise the same Gherkin step ("step", "text") failed in every attempt, however
+            its code was rewritten, so the step itself may be the problem. The error is under
+            "error", and "kind" is a first guess at its cause.
+            Ticket: $resolve.output.ticket
+            Feature files: $INPUTS.suite_dir/features/$resolve.output.ticket/
+            Specification: the files in $INPUTS.spec_dir
+            Browser evidence: $INPUTS.suite_dir/evidence/$resolve.output.ticket/explore.json
+
+            You may change HOW a scenario is checked:
+            - reword a step to match what the page really offers (a label, a role, a text);
+            - add a missing Given, such as data that has to exist first;
+            - split a scenario that does too much;
+            - make an expectation deterministic (no clock times, no ordering the app does not promise).
+            You may NOT change WHAT is expected. Every quoted value in a Then step, and in the
+            And and But steps after it, stays word for word; a check compares them after your
+            edit and undoes the edit if any value changed or went missing. If the scenario can
+            only pass by expecting something else, the spec and the app disagree: change
+            nothing, answer "needs-human", and say what the spec expects and what the app does.
+            Keep the tags and "# source:" comments. Then run
+              cd $INPUTS.suite_dir && bash scripts/lint-features.sh $resolve.output.ticket
+            and fix the files until it prints LINT-OK.
+          output_format:
+            type: object
+            properties:
+              action:
+                type: string
+                enum: [none, revised, needs-human]
+              summary:
+                type: string
+            required: [action, summary]
+            additionalProperties: false
+
+        # Ends the round. Undoes a revision that changed an expected value, records the
+        # round's outcome in final.json, and prints ROUND-CONTINUE or ROUND-STOP for until_bash.
+        - id: round-end
+          depends_on: [revise]
+          bash: |
+            set -u
+            S="$ARTIFACTS_DIR/spec-to-e2e"
+            k=$(cat "$S/round")
+            d="$S/round-$k"
+            verdict=$classify.output.verdict
+            action=$revise.output.action
+            summary=$revise.output.summary
+            ticket=$resolve.output.ticket
+            bin="$PWD/.archon/spec-to-e2e/bin"
+            fdir="$INPUTS_SUITE_DIR/features/$ticket"
+            final() {   # final <verdict> <reason>: the round's verdict file, with a new verdict and reason
+              jq -c --arg v "$1" --arg r "$2" --arg summary "$summary" \
+                '. + {verdict: $v, reason: $r, revise_summary: $summary}' "$d/verdict.json" > "$S/final.json"
+              cat "$S/final.json"
+            }
+            if [ "$verdict" != revise ]; then
+              cp "$d/verdict.json" "$S/final.json"
+              echo "ROUND-STOP ($verdict)"
+              exit 0
+            fi
+            case "$action" in
+              revised)
+                missing=$(bash "$bin/then-values.sh" "$fdir" | LC_ALL=C comm -23 "$S/then-values.txt" -)
+                if [ -n "$missing" ]; then
+                  rm -rf "$fdir"
+                  cp -R "$S/frozen" "$fdir"
+                  echo "The revision changed or removed expected values, so it was undone:"
+                  printf '%s\n' "$missing"
+                  final stop expected-values-changed
+                  echo "ROUND-STOP"
+                else
+                  echo $(( $(cat "$S/revisions" 2>/dev/null || echo 0) + 1 )) > "$S/revisions"
+                  echo "Feature revised: $summary"
+                  echo "ROUND-CONTINUE"
+                fi
+                ;;
+              needs-human)
+                final stop needs-human
+                echo "ROUND-STOP"
+                ;;
+              *)
+                final stop revise-declined
+                echo "ROUND-STOP"
+                ;;
+            esac
+
+  # Writes the ticket's state file and the traceability matrix from what the run left on
+  # disk. Runs whatever happened before it (trigger_rule: all_done). A ticket that did not
+  # finish green gets @flagged on its features, which keeps it out of suite runs until a
+  # person or a later run deals with it.
+  - id: finish
+    depends_on: [rounds]
+    trigger_rule: all_done
+    bash: |
+      set -u
+      S="$ARTIFACTS_DIR/spec-to-e2e"
+      if [ ! -f "$S/resolve.json" ]; then
+        echo "SPEC-TO-E2E error: the ticket was never resolved"
+        exit 1
+      fi
+      ticket=$(jq -r '.ticket' "$S/resolve.json")
+      suite=$INPUTS_SUITE_DIR
+      fdir="$suite/features/$ticket"
+      run_id="$WORKFLOW_ID"
+      extract_verdict=$(cat "$S/extract-verdict" 2>/dev/null || true)
+      final='{}'
+      if [ -z "$extract_verdict" ]; then
+        status=error; reason=extract-did-not-finish
+      elif [ "$extract_verdict" = no-e2e ]; then
+        status=no-e2e; reason=nothing-browser-testable
+      elif [ -f "$S/final.json" ]; then
+        final=$(cat "$S/final.json")
+        reason=$(printf '%s' "$final" | jq -r '.reason')
+        case "$(printf '%s' "$final" | jq -r '.verdict')/$reason" in
+          done/*) status=done ;;
+          */no-confirmed-scenarios|*/needs-human|*/expected-values-changed) status=needs-human ;;
+          *) status=flagged ;;
+        esac
+      elif [ -f "$S/lint-failed" ]; then
+        status=flagged; reason=feature-lint-failed
+      else
+        status=error; reason=loop-did-not-finish
+      fi
+
+      if [ "$status" != done ] && [ "$status" != no-e2e ]; then
+        for f in "$fdir"/*.feature; do
+          [ -f "$f" ] || continue
+          awk '{ l[NR] = $0 } END { for (i = 1; i <= NR; i++) {
+                 if (i < NR && l[i + 1] ~ /^[ \t]*Feature:/ && l[i] ~ /^[ \t]*@/ && l[i] !~ /@flagged/) l[i] = l[i] " @flagged"
+                 print l[i] } }' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+        done
+      fi
+
+      explore=null
+      if [ -f "$S/round" ] && [ -f "$suite/evidence/$ticket/explore.json" ]; then
+        explore=$(cat "$suite/evidence/$ticket/explore.json")
+      fi
+      mkdir -p "$suite/state"
+      jq -n \
+        --slurpfile resolved "$S/resolve.json" \
+        --arg status "$status" --arg reason "$reason" \
+        --argjson final "$final" --argjson explore "$explore" \
+        --argjson rounds "$(cat "$S/round" 2>/dev/null || echo 0)" \
+        --argjson revisions "$(cat "$S/revisions" 2>/dev/null || echo 0)" \
+        --arg features "$(ls "$fdir"/*.feature 2>/dev/null || true)" \
+        --arg run_id "$run_id" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        '$resolved[0] as $r
+        | (($explore.scenarios // []) | group_by(.name)
+            | map({name: .[0].name, browser_check: ((map(.status) | map(select(. != "confirmed")) | .[0]) // "confirmed")})) as $sc
+        | {
+          ticket: $r.ticket, spec_dir: $r.spec_dir, spec_sha: $r.spec_sha, related: $r.related,
+          status: $status, reason: $reason,
+          to_review: ($sc | map(select(.browser_check != "confirmed")) | length),
+          failing_step: (if ($final.step // "") == "" then null
+                         else {step: $final.step, text: $final.text, kind: $final.kind, error: $final.error} end),
+          revise_summary: ($final.revise_summary // null),
+          rounds: $rounds, feature_revisions: $revisions,
+          base_url: $r.base_url, app_build: ($explore.app_build // "unknown"),
+          scenarios: $sc,
+          feature_files: ($features | split("\n") | map(select(length > 0))),
+          run_id: $run_id, updated_at: $at
+        }' > "$suite/state/$ticket.json"
+      (cd "$suite" && bash scripts/matrix.sh > TRACEABILITY.md)
+      echo "wrote $suite/state/$ticket.json ($status: $reason) and $suite/TRACEABILITY.md"
+      [ "$status" != error ]
+
+  # UNIMPLEMENTED: pushes this ticket's rows of TRACEABILITY.md to a Confluence page, only
+  # for a done ticket and only its active scenarios. Like the Jira node, use a Kiro node with
+  # a Confluence MCP server and no other tools, or a bash node calling the REST API.
+  - id: publish
+    depends_on: [finish]
+    bash: |
+      echo "UNIMPLEMENTED: publish the ticket's traceability rows to Confluence (see SPEC-TO-E2E.md)"
+
+  # Commits only this ticket's files and the suite's shared files, never anything else you
+  # have staged (git commit -- <paths> commits just those paths).
+  - id: commit
+    depends_on: [finish]
+    when: "$INPUTS.commit == 'yes'"
+    bash: |
+      set -eu
+      S="$ARTIFACTS_DIR/spec-to-e2e"
+      ticket=$(jq -r '.ticket' "$S/resolve.json")
+      suite=$INPUTS_SUITE_DIR
+      status=$(jq -r '.status' "$suite/state/$ticket.json")
+      set --
+      for p in "$suite/features/$ticket" "$suite/steps/$ticket" "$suite/evidence/$ticket" \
+               "$suite/state/$ticket.json" "$suite/TRACEABILITY.md" "$suite/package.json" \
+               "$suite/package-lock.json" "$suite/playwright.config.ts" "$suite/.gitignore" "$suite/scripts"; do
+        [ -e "$p" ] && set -- "$@" "$p"
+      done
+      git add -- "$@"
+      if git diff --cached --quiet -- "$@"; then
+        echo "nothing new to commit for $ticket"
+        exit 0
+      fi
+      git commit -q -m "acceptance($ticket): $status" -- "$@"
+      git log -1 --oneline
+
+  # The last node, so its output is what the console shows (Archon prints only the output of
+  # nodes nothing depends on). Runs whatever happened before it.
+  - id: report
+    depends_on: [finish, publish, commit]
+    trigger_rule: all_done
+    bash: |
+      S="$ARTIFACTS_DIR/spec-to-e2e"
+      ticket=$(jq -r '.ticket' "$S/resolve.json" 2>/dev/null || echo unknown)
+      state="$INPUTS_SUITE_DIR/state/$ticket.json"
+      if [ ! -f "$state" ]; then
+        echo "SPEC-TO-E2E error $ticket (no state file; see the run's transcript)"
+        exit 1
+      fi
+      status=$(jq -r '.status' "$state")
+      suite=$INPUTS_SUITE_DIR
+      echo "Ticket:    $ticket ($status: $(jq -r '.reason' "$state"))"
+      echo "State:     $state"
+      echo "Features:  $suite/features/$ticket/"
+      echo "Steps:     $suite/steps/$ticket/"
+      echo "Evidence:  $suite/evidence/$ticket/ (explore.json, not-e2e.md, emergent.md)"
+      echo "Matrix:    $suite/TRACEABILITY.md"
+      jq -r '.scenarios[] | "  \(.browser_check)\t\(.name)"' "$state"
+      review=$(jq -r '.to_review' "$state")
+      [ "$review" -gt 0 ] && echo "$review scenario(s) left out of the tests for a person to review (see TRACEABILITY.md)"
+      echo "SPEC-TO-E2E $status $ticket"
+      [ "$status" != error ]
