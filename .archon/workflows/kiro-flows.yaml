@@ -53,6 +53,14 @@ description: |
 provider: kiro
 # Cheap model while you try it out; switch to a stronger one once the flow works for you.
 model: minimax-m2.5
+#
+# To run it on Claude instead (needs `archon provider add claude` or `archon setup`):
+#   provider: claude
+#   model: haiku          (green in round 1 on the TodoMVC demo, about 4 minutes)
+# and rename the tools, because allowed_tools uses each provider's own names:
+#   [read, write, shell] → [Read, Write, Edit, Bash, Glob, Grep]
+#   [read]               → [Read, Glob, Grep]
+# The MCP browser and every prompt and bash node stay as they are.
 
 inputs:
   group:
@@ -361,9 +369,11 @@ nodes:
             2. Inside it, one step per markdown line, in order, labelled with the line's
                text exactly as written after "- ":
                  await test.step('Then the claim\'s status shows "Rejected"', async () => { ... });
-            3. Start each test with `await login(page, '<role>')` (import { login } from
-               '../helpers/login'), using the role from its "logged in as" line, or
-               `await login(page)` when the flow has no role.
+            3. Log in inside the flow's first step (its "logged in as" or "open ... page"
+               line), not before it: `await login(page, '<role>')` (import { login } from
+               '../helpers/login') with the role from that line, or `await login(page)`
+               when the flow has no role; then go to the page the line names. Before the
+               first step, only declare constants such as `run` or locators.
             4. Replace {run} with a value unique to each run: `const run = Date.now().toString(36);`
                at the top of the test, then `e2e-claim-${run}`.
             5. Check every Then line, and every And/But line after it, with expect() on
@@ -586,6 +596,8 @@ nodes:
 
       Flows (the source of truth for what each test must do): $resolve.output.md_file
       Tests: $resolve.output.test_file
+      Helpers the tests import: the files in $INPUTS.suite_dir/helpers/ (read every one
+      the tests use, so you can tell what a step that calls a helper really does)
 
       If the test file does not exist, answer with no notes and the summary "no tests to review".
 
