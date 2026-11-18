@@ -74,6 +74,7 @@ cheap `minimax-m2.5` model, except `kiro-gherkin-playwright-loop`, which pins th
 | `kiro-fanout-include` | `include:` + `fan_out:`: runs the block `kiro-gherkin-step-block` (a `loop_group` that rewrites a step until a check passes) once per step, inside this one run with no child runs. Needs jq | completes, prints `FANOUT-INCLUDE-PASS` and each rewritten step |
 | `kiro-nested-loop-groups` | A `loop_group` inside a `loop_group`: the outer loop walks an array one step per round, the inner one runs two Kiro rounds per step. Needs jq | completes, prints `NESTED-LOOP-PASS` |
 | `kiro-spec-to-e2e` | One spec folder (linked to a Jira ticket) → tagged Gherkin, checked in the browser through Playwright MCP, then playwright-bdd step definitions run 3× with no retries behind anti-cheat gates; the feature is revised when the same step keeps failing. Jira and Confluence nodes are stubs. Design notes: [SPEC-TO-E2E.md](SPEC-TO-E2E.md). Needs Archon 0.14.0, Node.js, jq; about 35 minutes | completes, prints `SPEC-TO-E2E <status> TODO-101` (`done` in the trial run, with 3 scenarios left for review) |
+| `kiro-flows` | The simple sibling of `kiro-spec-to-e2e`: one feature group from a `features.yaml` → Kiro uses the app and writes 3–5 Given/When/Then flows in markdown, quoting what the screen showed → plain Playwright tests (no playwright-bdd), written in a loop of at most 3 rounds behind three bash judges: check (only allowed files changed, no cheats), run (twice, no retries) and break (each test must fail once its expected values are swapped). A read-only review adds notes. Needs Archon 0.14.0, Node.js, jq | completes, prints `FLOWS done todo-items`. The bash judges were tested with bash stand-ins for the two Kiro nodes (a frozen-file edit, a weak test, then a good one); a run with Kiro writing the flows and tests is still to do |
 | `kiro-bad-model` | How a configuration error surfaces | **fails** as `misconfigured` with Kiro's `InvalidModelError`, no retry |
 | `kiro-cancel-demo` | Cancelling a running node kills Kiro and its commands | see the steps in the workflow's description |
 
@@ -92,6 +93,10 @@ archon workflow run kiro-nested-loop-groups --no-worktree
 archon workflow run kiro-spec-to-e2e --no-worktree \
   --input spec_dir=.archon/spec-to-e2e/example-specs/TODO-101-todo-items \
   --input base_url=https://demo.playwright.dev/todomvc/   # writes acceptance/ into your checkout
+archon workflow run kiro-flows --no-worktree \
+  --input group=todo-items \
+  --input features=.archon/flows/example/features.yaml \
+  --input base_url=https://demo.playwright.dev/todomvc/   # writes flows-suite/ into your checkout
 
 # Playwright CLI: one-time setup in this repository, then run
 npm install -g @playwright/cli@latest
@@ -348,8 +353,9 @@ src/config.ts             assistants.kiro schemas (install / run / snapshot)
 src/descriptor.ts         descriptor and capabilities
 vendor/provider-contract  Archon's provider contract v0.14.0, vendored (not on npm yet)
 .archon/workflows/        sample workflows
-.archon/mcp/              MCP configs the samples use (Playwright, demo secret server)
+.archon/mcp/              MCP configs the samples use (Playwright, Playwright with a saved login, demo secret server)
 .archon/spec-to-e2e/      kiro-spec-to-e2e's scripts, suite template, driver and example spec
+.archon/flows/            kiro-flows' checks (bin/flows.mjs), suite template and example features.yaml
 .kiro/skills/             demo skill used by kiro-feature-tour
 scripts/                  build, local install, fixture recording
 e2e/                      real-Archon end-to-end driver

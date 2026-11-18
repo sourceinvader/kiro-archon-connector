@@ -1,0 +1,32 @@
+# A one-group features.yaml for trying kiro-flows against the public TodoMVC demo:
+#
+#   archon workflow run kiro-flows --no-worktree \
+#     --input group=todo-items \
+#     --input features=.archon/flows/example/features.yaml \
+#     --input base_url=https://demo.playwright.dev/todomvc/
+#
+# kiro-flows reads only these fields of a group: id, title, description, entry, roles,
+# notes, tickets (a list of keys, or of objects with a `key`), and spec paths under any of
+# the keys listed in SPEC_KEYS at the top of .archon/flows/bin/flows.mjs. Everything else
+# in the full features.yaml format is ignored, so your validated file works as it is.
+
+version: 1
+
+app:
+  base_url: https://demo.playwright.dev/todomvc/
+  build: unknown
+
+groups:
+  - id: todo-items
+    title: Todo list
+    description: Add todos, complete them, clear completed ones, see the count.
+    entry: /                      # path under base_url where the feature starts
+    # roles: [approver]           # leave out when the app has no login (TodoMVC has none)
+    tickets:
+      - key: TODO-101
+        spec: .archon/spec-to-e2e/example-specs/TODO-101-todo-items/spec.md
+
+no_ui: []
+
+review:
+  status: draft

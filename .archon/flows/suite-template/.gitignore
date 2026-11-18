@@ -1,0 +1,10 @@
+node_modules/
+test-results*/
+playwright-report/
+reports/**/html/
+reports/**/results.json
+reports/results.json
+# Saved logins (cookies): never commit them.
+.auth/
+# Temporary copies made by the workflow's break check.
+tests/*.zz-break.spec.ts

@@ -11,3 +11,7 @@ coverage/
 
 # Suite written by a trial run of kiro-spec-to-e2e in this repository
 /acceptance/
+
+# Suite written by a trial run of kiro-flows, and the logins it saves for the agent's browser
+/flows-suite/
+.flows-auth/

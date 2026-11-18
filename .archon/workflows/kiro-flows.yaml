@@ -1,0 +1,735 @@
+name: kiro-flows
+description: |
+  Use when: you want plain Playwright tests for one feature group of a running app, written
+  from what the app does today, quickly enough to show a team. A simpler sibling of
+  kiro-spec-to-e2e: no playwright-bdd, no Gherkin files, one environment.
+  Does: reads one group from features.yaml (its tickets and spec files), checks that the
+  app is up and login works, then has Kiro use the app in a real browser and write
+  3-5 user flows as Given/When/Then lines in flows/<group>.md, quoting exactly what the
+  screen showed. The markdown is frozen. A loop (at most 3 rounds) has Kiro turn it into
+  tests/<group>.spec.ts, one test per flow and one test.step per line, and three bash
+  judges decide: check (only allowed files changed, no cheats), run (every test passes
+  twice, no retries) and break (each test fails once its expected values are swapped).
+  A read-only Kiro review then compares each line with its code, and a report is written.
+  NOT for: testing several environments, API setup, or Gherkin/BDD tooling. Those come later.
+  Input:
+    group      (required) a group id from features.yaml, e.g. claim-review
+    base_url   (required) the app, e.g. https://dev.example.com/
+    features   path to features.yaml (default: features.yaml)
+    suite_dir  where the Playwright suite lives (default: flows-suite)
+    max_flows  most flows explore may write (default: 5)
+    commit     yes to commit the group's files at the end (default: no)
+  Before the first run against an app with a login: write <suite_dir>/helpers/login.ts
+  (setup creates a template the first time) and export E2E_USER_<ROLE> / E2E_PASS_<ROLE>.
+  Try it on the public TodoMVC demo (no login):
+    archon workflow run kiro-flows --no-worktree \
+      --input group=todo-items \
+      --input features=.archon/flows/example/features.yaml \
+      --input base_url=https://demo.playwright.dev/todomvc/
+  Output: in the suite, flows/<group>.md (show this to the team), tests/<group>.spec.ts,
+  reports/<group>/summary.md, review.md and html/. The last line printed is
+  FLOWS <done|failed|needs-human|error> <group>.
+  Needs: Archon >= 0.14.0, Node.js 20+ with npm, jq, network access to the app and the npm
+  registry, and --no-worktree (the suite is meant to live in your checkout).
+  Cost: 3-5 Kiro turns (explore once, write 1-3 times, review once).
+
+# The flow, start to finish. Every node is described where it is defined below.
+#
+#   setup → resolve → smoke → explore → freeze
+#     → rounds (at most 3): write → check → run → break → gate
+#     → review → review-save → report
+#
+# Who decides what:
+#   - Kiro writes two things only: the flows markdown (explore) and the test file (write).
+#   - Bash decides everything else: whether the markdown is well formed, whether the tests
+#     pass, whether they can fail, and the final status. A model never judges its own work.
+#
+# Where things live while it runs:
+#   - $ARTIFACTS_DIR/flows/  this run's scratch space: group.json, the frozen file list, the
+#     judges' own copy of the scripts, and one folder per round with its feedback.
+#   - <suite_dir>/           the Playwright suite you keep (and may commit).
+#   - .flows-auth/           saved logins for the agent's browser (git-ignored, never commit).
+
+provider: kiro
+# Cheap model while you try it out; switch to a stronger one once the flow works for you.
+model: minimax-m2.5
+
+inputs:
+  group:
+    required: true
+    description: a group id from features.yaml
+  base_url:
+    required: true
+    description: the app the tests run against
+  features:
+    default: features.yaml
+    description: path to the features.yaml that groups tickets and spec files
+  suite_dir:
+    default: flows-suite
+    description: the Playwright suite's folder in this repository
+  max_flows:
+    default: "5"
+    description: the most flows explore may write for one group
+  commit:
+    default: "no"
+    description: yes commits the group's files when the run ends
+
+nodes:
+  # ---------------------------------------------------------------------------------------
+  # setup (bash)
+  # Creates the suite the first time from .archon/flows/suite-template: package.json with
+  # pinned versions, playwright.config.ts (no retries, one worker, HTML report), a template
+  # helpers/login.ts and the smoke test. It never overwrites a file that already exists,
+  # so your edits survive. Then it installs packages and Chromium.
+  #
+  # It runs before resolve (not after, as first sketched) because resolve reads YAML with
+  # the `yaml` package this node installs: the client machine may not have yq.
+  # ---------------------------------------------------------------------------------------
+  - id: setup
+    timeout: 900000
+    bash: |
+      set -eu
+      suite=$INPUTS_SUITE_DIR
+      tpl=.archon/flows/suite-template
+      mkdir -p "$suite/flows" "$suite/tests" "$suite/helpers" "$suite/reports"
+      (cd "$tpl" && find . -type f | sed 's|^\./||') | while IFS= read -r f; do
+        if [ ! -e "$suite/$f" ]; then
+          mkdir -p "$suite/$(dirname "$f")"
+          cp "$tpl/$f" "$suite/$f"
+          echo "created $suite/$f"
+        fi
+      done
+      cd "$suite"
+      if [ ! -d node_modules/@playwright/test ] || [ ! -d node_modules/yaml ]; then
+        npm install --no-audit --no-fund --loglevel=error >&2
+      fi
+      npx --no-install playwright install chromium >&2
+      # Kiro gives an MCP server about 30 seconds to start. Warm the npx cache now so the
+      # Playwright MCP server never has to download itself during explore or write.
+      npx -y @playwright/mcp@0.0.85 --help >/dev/null 2>&1 || true
+      echo "suite ready in $suite"
+
+  # ---------------------------------------------------------------------------------------
+  # resolve (bash)
+  # Finds the group in features.yaml and prints it as one line of JSON. Later prompts read
+  # its fields as $resolve.output.<field>:
+  #   group, base_url (always ending in /), md_file, test_file, test_rel, title,
+  #   description, entry, roles, first_role, tickets, specs, notes
+  # roles, tickets and specs are comma-separated. It fails if the group is missing or a
+  # spec file it lists doesn't exist. The JSON is also saved to group.json, so nodes that
+  # must run even after a failure can read a file instead of a node that never ran.
+  #
+  # ADJUST: if your features.yaml stores spec paths under another key, add the key to
+  # SPEC_KEYS at the top of .archon/flows/bin/flows.mjs.
+  # ---------------------------------------------------------------------------------------
+  - id: resolve
+    depends_on: [setup]
+    bash: |
+      set -eu
+      S="$ARTIFACTS_DIR/flows"
+      mkdir -p "$S"
+      out=$(node .archon/flows/bin/flows.mjs resolve "$INPUTS_FEATURES" "$INPUTS_GROUP" "$INPUTS_SUITE_DIR" "$INPUTS_BASE_URL")
+      printf '%s\n' "$out" > "$S/group.json"
+      printf '%s' "$out"
+
+  # ---------------------------------------------------------------------------------------
+  # smoke (bash)
+  # A cheap guard before any model is used. It runs tests/_smoke.spec.ts, which logs in
+  # as each role the group lists (or opens the app once if it lists none) and opens the
+  # group's entry page. If the app is down or login is broken, the run stops here instead
+  # of paying for an agent to discover it.
+  #
+  # It also saves each role's logged-in browser state, and copies the first role's to
+  # .flows-auth/explore.json. The agent's browser loads that file (see
+  # .archon/mcp/playwright-flows.json), so the agent starts out logged in and never sees a
+  # password. A group that lists roles while helpers/login.ts is still the template fails
+  # here with a message telling you to write the helper.
+  # ---------------------------------------------------------------------------------------
+  - id: smoke
+    depends_on: [resolve]
+    timeout: 600000
+    bash: |
+      set -u
+      S="$ARTIFACTS_DIR/flows"
+      suite=$INPUTS_SUITE_DIR
+      roles=$resolve.output.roles
+      first=$resolve.output.first_role
+      entry=$resolve.output.entry
+      base_url=$resolve.output.base_url
+      auth="$PWD/.flows-auth"
+      say() { printf '%s\n' "$1" | tee "$S/smoke.txt"; }
+      if [ -n "$roles" ] && grep -q TEMPLATE-LOGIN "$suite/helpers/login.ts"; then
+        say "SMOKE-FAIL: this group logs in as ($roles), but $suite/helpers/login.ts is still the template. Write the login helper first, then run again."
+        exit 1
+      fi
+      mkdir -p "$auth"
+      cd "$suite" || exit 1
+      # Playwright sets FORCE_COLOR for its workers; an inherited NO_COLOR then makes Node warn.
+      if out=$(env -u NO_COLOR -u FORCE_COLOR BASE_URL="$base_url" FLOWS_ROLES="$roles" \
+                 FLOWS_ENTRY="$entry" FLOWS_AUTH_DIR="$auth" \
+                 npx --no-install playwright test tests/_smoke.spec.ts \
+                   --reporter=line --retries=0 --output=test-results-smoke 2>&1); then
+        cp "$auth/$first.json" "$auth/explore.json" || { say "SMOKE-FAIL: no saved login for $first"; exit 1; }
+        say "SMOKE-OK: opened $entry as ${roles:-a visitor (no login)}"
+      else
+        say "SMOKE-FAIL: the app is unreachable or login is broken
+      $(printf '%s\n' "$out" | tail -n 30)"
+        exit 1
+      fi
+
+  # ---------------------------------------------------------------------------------------
+  # explore (Kiro: read, write, shell, plus the Playwright browser)
+  # Reads the group's specs, uses the app, and writes flows/<group>.md. This file is what
+  # you show the team, and the only source the tests are written from.
+  #
+  # The one rule that matters most: every quoted value in a Then line is text the agent SAW
+  # on the screen, never text copied from the spec. The app is the truth; where the spec
+  # disagrees, that goes in a Differences list instead of a test.
+  #
+  # It may run the lint itself until the file is well formed. The freeze node runs the
+  # same lint and has the final say.
+  # ---------------------------------------------------------------------------------------
+  - id: explore
+    depends_on: [smoke]
+    mcp: .archon/mcp/playwright-flows.json
+    allowed_tools: [read, write, shell]
+    prompt: |
+      You are writing down how one feature of a running web app behaves today, as a few
+      user flows in markdown. A Playwright test will be written from each flow and kept for
+      a long time, so being exact about what the screen shows matters more than covering a lot.
+
+      App: $resolve.output.base_url
+      Your browser is already logged in as: $resolve.output.first_role ("default" means the app has no login)
+      Feature group: $resolve.output.title (id $resolve.output.group)
+      What it covers: $resolve.output.description
+      Where it starts, relative to the app: $resolve.output.entry
+      Notes: $resolve.output.notes
+      Roles in this group: $resolve.output.roles
+      Tickets: $resolve.output.tickets
+      Spec files (read every one; a folder means every file in it): $resolve.output.specs
+
+      1. Read the specs to learn what the feature is meant to do. They may be out of date:
+         the app is the truth, the specs only tell you where to look.
+      2. Use the app in the browser. Try the behaviours the specs describe, and anything
+         important a user relies on that the specs don't mention.
+      3. Write the file $resolve.output.md_file with between 1 and $INPUTS.max_flows flows
+         (aim for 3), in exactly this shape:
+
+         # Flows: <feature group title>
+
+         ## Flow: <what the user achieves> @<TICKET>
+         - Given I am logged in as "<role>"
+         - And I create a claim named "e2e-claim-{run}"
+         - When I open "e2e-claim-{run}" and reject it with reason "Duplicate"
+         - Then the claim's status shows "Rejected"
+         - And the message "Claim rejected" is shown
+
+         ## Differences
+         - <TICKET>: the spec says <X>; the app does <Y>.
+
+         ## Not found
+         - <TICKET>: <what the spec describes that you could not find in the app>.
+
+      Rules:
+      - Every quoted value in a Then line, and in the And/But lines after it, is text you
+        saw on the screen, copied exactly: case, punctuation and spacing. Never take an
+        expected value from the spec.
+      - Where the spec and the app disagree, write the flow the way the app behaves and add
+        a line under "## Differences". Spec behaviour you could not find in the app goes
+        under "## Not found"; write no flow for it.
+      - Each flow stands alone and starts from scratch. Its first line logs in
+        (Given I am logged in as "<role>") or, when the app has no login, opens a page
+        (Given I open the <name> page). A flow may be a long journey through several screens.
+      - Set up what a flow needs through the UI, as Given/And lines. Anything a flow
+        creates gets a name that starts with "e2e-" and ends with "-{run}"; the test
+        replaces {run} with a value unique to each run, so a flow can run again and again.
+      - Every flow must expect at least one thing the app produced (a message, a count, a
+        status), not only text the flow typed itself.
+      - Tag each flow with the tickets it covers (@KEY, from the list above), or @emergent
+        when no ticket describes it.
+      - Use the app's own words: button labels, headings, messages.
+      - Never change or delete data you did not create.
+      - Write only that one file. If it already exists from an earlier run, keep the flows
+        that still match the app and fix the rest.
+
+      When the file is written, run
+        node .archon/flows/bin/flows.mjs lint $resolve.output.md_file --tickets '$resolve.output.tickets' --max $INPUTS.max_flows
+      and fix the file until it prints FLOWS-OK. Close the browser when you are done.
+      Reply with one line per flow: its name and tags.
+
+  # ---------------------------------------------------------------------------------------
+  # freeze (bash, runs even if explore failed)
+  # Lints the markdown. If it's well formed, it freezes it: it records a hash of every
+  # file the writer must not touch (the markdown, the config, the smoke test, login.ts,
+  # other groups' tests, and the judges' scripts in .archon/flows/bin), keeps a copy of
+  # each so a later round can put them back, and copies the scripts to
+  # $ARTIFACTS_DIR/flows/bin. The judges run that copy, so editing the repository's copy
+  # can't change a verdict.
+  #
+  # It prints exactly "frozen" or "not-frozen", because the rounds node's `when:` compares
+  # it. The details go to freeze.txt and the report. A bad markdown ends the run as
+  # needs-human: fix flows/<group>.md by hand and run again (explore keeps flows that
+  # still match the app).
+  # ---------------------------------------------------------------------------------------
+  - id: freeze
+    depends_on: [explore]
+    trigger_rule: all_done
+    bash: |
+      set -u
+      S="$ARTIFACTS_DIR/flows"
+      mkdir -p "$S"
+      if [ ! -f "$S/group.json" ]; then
+        echo "the group was never resolved" > "$S/freeze.txt"
+        printf 'not-frozen'
+        exit 0
+      fi
+      md=$(jq -r '.md_file' "$S/group.json")
+      tickets=$(jq -r '.tickets' "$S/group.json")
+      J="$S/bin"
+      rm -rf "$J" "$S/frozen-files"
+      cp -R .archon/flows/bin "$J"
+      if out=$(node "$J/flows.mjs" lint "$md" --tickets "$tickets" --max "$INPUTS_MAX_FLOWS" 2>&1); then
+        node "$J/flows.mjs" freeze-list "$INPUTS_SUITE_DIR" "$INPUTS_GROUP" .archon/flows/bin > "$S/frozen.txt"
+        # "<64-char sha>  <path>": the path starts at column 67.
+        cut -c67- "$S/frozen.txt" | while IFS= read -r p; do
+          mkdir -p "$S/frozen-files/$(dirname "$p")"
+          cp "$p" "$S/frozen-files/$p"
+        done
+        printf '%s\n' "$out" > "$S/freeze.txt"
+        printf '%s\n' "$out" >&2
+        printf 'frozen'
+      else
+        printf '%s\n' "$out" > "$S/freeze.txt"
+        printf '%s\n' "$out" >&2
+        printf 'not-frozen'
+      fi
+
+  # ---------------------------------------------------------------------------------------
+  # rounds (loop_group, at most 3 rounds)
+  # Each round: write → check → run → break → gate. The loop ends when gate prints
+  # FLOWS-GREEN, or after 3 rounds either way (on_exhausted: complete lets the report
+  # run and say "failed" rather than the whole run crashing).
+  #
+  # A round stops at its first failure: the failing judge writes round-<k>/failed and
+  # feedback.md, and the judges after it see that file and do nothing. Gate then hands the
+  # feedback to the next round's write.
+  #
+  # Every judge exits 0 even when the tests fail, because a failed node inside a
+  # loop_group fails the whole group at once. They report red or green in their output.
+  #
+  # fresh_context: false keeps one Kiro session for write across rounds, so round 2
+  # remembers what round 1 tried.
+  # ---------------------------------------------------------------------------------------
+  - id: rounds
+    depends_on: [freeze]
+    when: "$freeze.output == 'frozen'"
+    loop_group:
+      max_iterations: 3
+      until_bash: 'out=$gate.output; case "$out" in *FLOWS-GREEN*) exit 0 ;; *) exit 1 ;; esac'
+      on_exhausted: complete
+      fresh_context: false
+      nodes:
+        # -----------------------------------------------------------------------------
+        # write (Kiro: read, write, shell, plus the Playwright browser)
+        # Turns the frozen markdown into tests/<group>.spec.ts. It MAY run its own tests
+        # and the check script as often as it likes while it debugs; that's how it finds
+        # broken locators. It may NOT declare itself done: the judges after it re-run
+        # everything from scratch, and only their verdict counts.
+        #
+        # Kiro has no hard cap on tool calls inside Archon, so the prompt asks it to stop
+        # after about 40. If a test still fails then, the judges' feedback starts the next
+        # round instead of the model looping on one locator.
+        # -----------------------------------------------------------------------------
+        - id: write
+          mcp: .archon/mcp/playwright-flows.json
+          allowed_tools: [read, write, shell]
+          prompt: |
+            You write plain Playwright tests (@playwright/test, TypeScript) from user flows
+            written in markdown, for the app at $resolve.output.base_url.
+
+            Flows (frozen: never edit this file): $resolve.output.md_file
+            Your test file: $resolve.output.test_file
+            Helpers: $INPUTS.suite_dir/helpers/ (login.ts is written by a person: use it, don't change it)
+            Your browser is logged in as: $resolve.output.first_role
+            Feedback from the checks on your last attempt (empty on the first attempt):
+            $LOOP_PREV.gate.output
+
+            Rules (a script checks most of them, and breaking one fails the attempt):
+            1. One test per flow. Its title is the flow's heading after "Flow:", exactly,
+               tags included, e.g.
+                 test('Reject a submitted claim @PROJ-40', async ({ page }) => {
+            2. Inside it, one step per markdown line, in order, labelled with the line's
+               text exactly as written after "- ":
+                 await test.step('Then the claim\'s status shows "Rejected"', async () => { ... });
+            3. Start each test with `await login(page, '<role>')` (import { login } from
+               '../helpers/login'), using the role from its "logged in as" line, or
+               `await login(page)` when the flow has no role.
+            4. Replace {run} with a value unique to each run: `const run = Date.now().toString(36);`
+               at the top of the test, then `e2e-claim-${run}`.
+            5. Check every Then line, and every And/But line after it, with expect() on
+               exactly the quoted text. Point the locator at the element the line is about
+               (the status cell of that claim, the footer), so the text can't match somewhere
+               else on the page: a later check swaps your expected values for nonsense and
+               every test must then fail.
+            6. Navigate with paths relative to the app: page.goto('./'), page.goto('claims').
+               Never a full http(s) URL.
+            7. Prefer getByRole, getByLabel and getByText. Use the browser to find locators
+               that work on the live page.
+            8. Shared setup may go in new files under helpers/. No expect() in helpers.
+               Reuse a helper before writing a new one.
+            9. Not allowed: test.skip/fixme/fail/only, expect.soft, try/catch, .catch(),
+               if statements, waitForTimeout, page.route (no mocking), full URLs.
+            10. Change only your test file and helpers/ (not login.ts). A change to any other
+                file fails the round and is undone.
+
+            While you work you may run, as often as you like:
+              cd $INPUTS.suite_dir && BASE_URL='$resolve.output.base_url' npx playwright test $resolve.output.test_rel --reporter=line --retries=0 --workers=1
+              node .archon/flows/bin/flows.mjs check $INPUTS.suite_dir $INPUTS.group
+            A test you saw pass once isn't finished: the checks after your turn decide.
+            Stop after about 40 tool calls. If something still fails then, end your turn and
+            say what; the next attempt gets the checks' feedback.
+            Close the browser when you are done. Reply with the test titles and one line on
+            what you changed since your last attempt.
+
+        # -----------------------------------------------------------------------------
+        # check (bash judge, no browser)
+        # 1. Only allowed files changed. Compares the frozen file list with now. If
+        #    anything else changed, appeared or disappeared, it says which files, puts
+        #    the frozen ones back from freeze's copy, and deletes new ones, so a bad round
+        #    can't leave the suite broken.
+        # 2. The test file matches the flows and has no cheats (flows.mjs check):
+        #    one test per flow with its exact title; one test.step per line; every
+        #    quoted Then value used in code, not just in a label; at least one expect
+        #    per Then line; no skip/only/fixme/fail, expect.soft, try/catch, if,
+        #    waitForTimeout, page.route or full URLs; no expect() in helpers.
+        # It also counts the round, since it's the first bash node in each round.
+        # -----------------------------------------------------------------------------
+        - id: check
+          depends_on: [write]
+          bash: |
+            set -u
+            S="$ARTIFACTS_DIR/flows"
+            J="$S/bin"
+            k=$(( $(cat "$S/round" 2>/dev/null || echo 0) + 1 ))
+            echo "$k" > "$S/round"
+            d="$S/round-$k"
+            mkdir -p "$d"
+            fail() {
+              echo check > "$d/failed"
+              { echo "CHECK FAILED (round $k)"; printf '%s\n' "$1"; } > "$d/feedback.md"
+              cat "$d/feedback.md"
+              exit 0
+            }
+            paths() { cut -c67- "$1" | LC_ALL=C sort; }
+            # A report from an earlier round must not pass for this round's.
+            rm -rf "$INPUTS_SUITE_DIR/reports/$INPUTS_GROUP/results.json" "$INPUTS_SUITE_DIR/reports/$INPUTS_GROUP/html"
+
+            node "$J/flows.mjs" freeze-list "$INPUTS_SUITE_DIR" "$INPUTS_GROUP" .archon/flows/bin > "$d/frozen-now.txt"
+            if ! diff "$S/frozen.txt" "$d/frozen-now.txt" > "$d/frozen.diff"; then
+              changed=$(grep -E '^[<>]' "$d/frozen.diff" | cut -c69- | LC_ALL=C sort -u)
+              paths "$S/frozen.txt" | while IFS= read -r p; do
+                mkdir -p "$(dirname "$p")"
+                cp "$S/frozen-files/$p" "$p"
+              done
+              LC_ALL=C comm -13 <(paths "$S/frozen.txt") <(paths "$d/frozen-now.txt") | while IFS= read -r p; do
+                rm -f "$p"
+              done
+              fail "Only your test file and helpers/ (not helpers/login.ts) may change. These files
+            changed, appeared or disappeared, and have been put back:
+            $changed"
+            fi
+
+            if ! out=$(node "$J/flows.mjs" check "$INPUTS_SUITE_DIR" "$INPUTS_GROUP" 2>&1); then
+              fail "$out"
+            fi
+            echo "check passed (round $k): $out"
+
+        # -----------------------------------------------------------------------------
+        # run (bash judge)
+        # Runs the group's tests twice each (--repeat-each=2), with no retries and one
+        # worker. Green means Playwright exited 0 AND exactly flows × 2 tests passed, so
+        # a test that was skipped or never found can't count as a pass. The HTML report
+        # goes to reports/<group>/html: that's the one to show the team.
+        # -----------------------------------------------------------------------------
+        - id: run
+          depends_on: [check]
+          timeout: 1800000
+          bash: |
+            set -u
+            S="$ARTIFACTS_DIR/flows"
+            J="$S/bin"
+            k=$(cat "$S/round")
+            d="$S/round-$k"
+            if [ -f "$d/failed" ]; then echo "run skipped: $(cat "$d/failed") failed in round $k"; exit 0; fi
+            md=$resolve.output.md_file
+            test_rel=$resolve.output.test_rel
+            base_url=$resolve.output.base_url
+            group=$INPUTS_GROUP
+            flows=$(node "$J/flows.mjs" break-plan "$md" | wc -l | tr -d ' ')
+            want=$((flows * 2))
+            cd "$INPUTS_SUITE_DIR" || exit 1
+            mkdir -p "reports/$group"
+            rm -rf "reports/$group/html"
+            out=$(env -u NO_COLOR -u FORCE_COLOR BASE_URL="$base_url" \
+                    FLOWS_HTML_DIR="reports/$group/html" FLOWS_JSON_FILE="reports/$group/results.json" \
+                    npx --no-install playwright test "$test_rel" --repeat-each=2 --retries=0 --workers=1 2>&1)
+            code=$?
+            printf '%s\n' "$out" > "$d/run.txt"
+            passed=$(printf '%s\n' "$out" | grep -oE '[0-9]+ passed' | tail -n 1 | grep -oE '[0-9]+')
+            passed=${passed:-0}
+            if [ "$code" -eq 0 ] && [ "$passed" -eq "$want" ]; then
+              echo "run passed (round $k): $passed of $want test runs"
+            else
+              echo run > "$d/failed"
+              {
+                echo "RUN FAILED (round $k): $passed of $want test runs passed (each test runs twice)."
+                echo "The last lines of the Playwright output:"
+                printf '%s\n' "$out" | tail -n 80
+              } > "$d/feedback.md"
+              cat "$d/feedback.md"
+            fi
+
+        # -----------------------------------------------------------------------------
+        # break (bash judge): "can this test fail?"
+        # For each flow, it copies the test file with that flow's expected values (the
+        # quoted Then text the app produced) replaced by "zz-not-this-<n>", runs only
+        # that test from the copy, and requires it to FAIL. A test that stays green
+        # doesn't really check what its Then lines say, e.g. it checks page-wide text that
+        # also appears in a menu, or the value sits only in a step label.
+        # Values the flow typed itself (e2e-...-{run}) aren't swapped: changing them would
+        # change the input and the expectation together. The real test file is never
+        # touched, and the copy is deleted on exit.
+        # -----------------------------------------------------------------------------
+        - id: break
+          depends_on: [run]
+          timeout: 1800000
+          bash: |
+            set -u
+            S="$ARTIFACTS_DIR/flows"
+            J="$S/bin"
+            k=$(cat "$S/round")
+            d="$S/round-$k"
+            if [ -f "$d/failed" ]; then echo "break skipped: $(cat "$d/failed") failed in round $k"; exit 0; fi
+            md=$resolve.output.md_file
+            test_rel=$resolve.output.test_rel
+            base_url=$resolve.output.base_url
+            node "$J/flows.mjs" break-plan "$md" > "$d/break-plan.jsonl"
+            cd "$INPUTS_SUITE_DIR" || exit 1
+            copy="${test_rel%.spec.ts}.zz-break.spec.ts"
+            trap 'rm -f "$copy"' EXIT
+            : > "$d/break-problems.txt"
+            while IFS= read -r row; do
+              title=$(printf '%s' "$row" | jq -r '.title')
+              grep_re=$(printf '%s' "$row" | jq -r '.grep')
+              values=$(printf '%s' "$row" | jq -c '.values')
+              node "$J/flows.mjs" mutate "$test_rel" "$copy" "$title" "$values" > /dev/null
+              out=$(env -u NO_COLOR -u FORCE_COLOR BASE_URL="$base_url" \
+                      npx --no-install playwright test "$copy" --grep "$grep_re" \
+                        --retries=0 --workers=1 --reporter=line --output=test-results-break 2>&1)
+              if printf '%s\n' "$out" | grep -qE '(^|[^0-9])1 failed'; then
+                echo "fails as it should with its values swapped: $title"
+              elif printf '%s\n' "$out" | grep -qE '[0-9]+ passed'; then
+                printf -- '- "%s" still passes with its expected values %s replaced by zz-not-this. Its expect() calls do not really check those values: assert the exact text on the element the line is about.\n' \
+                  "$title" "$values" >> "$d/break-problems.txt"
+              else
+                printf -- '- could not run the swapped copy of "%s":\n%s\n' "$title" "$(printf '%s\n' "$out" | tail -n 15)" >> "$d/break-problems.txt"
+              fi
+            done < "$d/break-plan.jsonl"
+            if [ -s "$d/break-problems.txt" ]; then
+              echo break > "$d/failed"
+              { echo "BREAK FAILED (round $k): these tests can't fail"; cat "$d/break-problems.txt"; } > "$d/feedback.md"
+              cat "$d/feedback.md"
+            else
+              echo "break passed (round $k): every test fails when its expected values change"
+            fi
+
+        # -----------------------------------------------------------------------------
+        # gate (bash)
+        # Decides the round. All three judges passed: prints FLOWS-GREEN and the loop
+        # stops. Otherwise it prints FLOWS-RED plus the failing judge's feedback, which
+        # the next round's write receives as $LOOP_PREV.gate.output. It also records the
+        # latest result in a file for the report.
+        # -----------------------------------------------------------------------------
+        - id: gate
+          depends_on: [break]
+          bash: |
+            set -u
+            S="$ARTIFACTS_DIR/flows"
+            k=$(cat "$S/round")
+            d="$S/round-$k"
+            if [ -f "$d/failed" ]; then
+              echo red > "$S/result"
+              echo "FLOWS-RED (round $k: $(cat "$d/failed") failed)"
+              echo
+              cat "$d/feedback.md"
+            else
+              echo green > "$S/result"
+              echo "FLOWS-GREEN (round $k)"
+            fi
+
+  # ---------------------------------------------------------------------------------------
+  # review (Kiro, read only: no shell, no browser, no writing)
+  # An adversarial second look. It puts each markdown line next to the code in its
+  # test.step and flags what a script can't see: the right text checked in the wrong
+  # place, a step that does something else, setup that skips the flow's own steps. Its
+  # notes are advice for you and the team; they never fail the run, because a model
+  # reviewer can be wrong in both directions.
+  # It runs whether the loop went green or not, as long as the flows were frozen.
+  # ---------------------------------------------------------------------------------------
+  - id: review
+    depends_on: [rounds]
+    trigger_rule: all_done
+    when: "$freeze.output == 'frozen'"
+    allowed_tools: [read]
+    prompt: |
+      You review Playwright tests that someone else wrote from user flows. You change nothing.
+
+      Flows (the source of truth for what each test must do): $resolve.output.md_file
+      Tests: $resolve.output.test_file
+
+      If the test file does not exist, answer with no notes and the summary "no tests to review".
+
+      For each flow, put each markdown line next to the code in its test.step, and look for:
+      - a Then line whose expect() could pass for the wrong reason: page-wide text that also
+        appears in a menu, a dropdown, a heading or an earlier message;
+      - a step whose code does something other than its line says, or nothing at all;
+      - a Then line with no expect() on its quoted text;
+      - setup that skips the flow's own steps, e.g. going straight to a URL the user would
+        reach by clicking;
+      - reliance on data the test didn't create, e.g. "the first row".
+      Report only problems you can point to in the code. Leave out flows that look right.
+    output_format:
+      type: object
+      properties:
+        notes:
+          type: array
+          items:
+            type: object
+            properties:
+              flow:
+                type: string
+              line:
+                type: string
+              problem:
+                type: string
+            required: [flow, line, problem]
+            additionalProperties: false
+        summary:
+          type: string
+      required: [notes, summary]
+      additionalProperties: false
+
+  # ---------------------------------------------------------------------------------------
+  # review-save (bash)
+  # Writes the review to reports/<group>/review.md. It exists only because reading the
+  # output of a node that never ran fails: if review was skipped, this node is skipped
+  # too, and the report (which reads files only) still runs.
+  # ---------------------------------------------------------------------------------------
+  - id: review-save
+    depends_on: [review]
+    bash: |
+      set -u
+      review=$review.output
+      dir="$INPUTS_SUITE_DIR/reports/$INPUTS_GROUP"
+      mkdir -p "$dir"
+      printf '%s' "$review" | jq -r --arg g "$INPUTS_GROUP" '
+        "# Review of tests/\($g).spec.ts\n\n"
+        + "Advice from a read-only model review; it never fails the run.\n\n"
+        + .summary + "\n\n"
+        + (if (.notes | length) == 0 then "No problems found.\n"
+           else (.notes | map("- **\(.flow)** · `\(.line)`: \(.problem)") | join("\n")) + "\n" end)' \
+        > "$dir/review.md"
+      echo "wrote $dir/review.md ($(printf '%s' "$review" | jq '.notes | length') notes)"
+
+  # ---------------------------------------------------------------------------------------
+  # report (bash, always runs, reads files only)
+  # Works out the run's status, writes reports/<group>/summary.md, commits the group's
+  # files when commit=yes, and prints the summary. It's the last node, so its output is
+  # what the console shows (Archon prints only nodes nothing depends on).
+  #   done         every test passed twice and failed when its values were swapped
+  #   failed       the tests were still red after the last round
+  #   needs-human  flows/<group>.md is missing or malformed; fix it and run again
+  #   error        setup, resolve, smoke or explore didn't finish
+  # ---------------------------------------------------------------------------------------
+  - id: report
+    depends_on: [review-save]
+    trigger_rule: all_done
+    bash: |
+      set -u
+      S="$ARTIFACTS_DIR/flows"
+      group=$INPUTS_GROUP
+      suite=$INPUTS_SUITE_DIR
+      dir="$suite/reports/$group"
+      mkdir -p "$dir"
+      result=$(cat "$S/result" 2>/dev/null || true)
+      rounds=$(cat "$S/round" 2>/dev/null || echo 0)
+      if [ ! -f "$S/group.json" ]; then
+        status=error; reason="setup or resolve failed (see the run's transcript)"
+      elif ! grep -q SMOKE-OK "$S/smoke.txt" 2>/dev/null; then
+        status=error; reason=$(head -n 1 "$S/smoke.txt" 2>/dev/null || echo "the smoke check did not run")
+      elif ! grep -q FLOWS-OK "$S/freeze.txt" 2>/dev/null; then
+        if [ -f "$suite/flows/$group.md" ]; then
+          status=needs-human; reason="flows/$group.md is malformed; fix it as listed below and run again"
+        else
+          status=error; reason="explore did not write flows/$group.md"
+        fi
+      elif [ "$result" = green ]; then
+        status=done; reason="every test passed twice, and failed when its expected values were swapped"
+      elif [ "$result" = red ]; then
+        status=failed; reason="tests still failing after $rounds round(s); see the last feedback below"
+      else
+        status=error; reason="the test loop did not finish (see the run's transcript)"
+      fi
+
+      {
+        echo "# $group: $status"
+        echo
+        echo "$reason"
+        echo
+        echo "- Run: $WORKFLOW_ID, $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        echo "- App: $INPUTS_BASE_URL"
+        echo "- Rounds used: $rounds of 3"
+        echo "- Flows: flows/$group.md · Tests: tests/$group.spec.ts · HTML report: reports/$group/html/index.html"
+        if [ -f "$dir/results.json" ]; then
+          echo
+          echo "## Tests (last run, each twice)"
+          jq -r '[.. | objects | select(has("specs")) | .specs[]] | group_by(.title)[]
+                 | "- \(if all(.[]; .ok) then "PASS" else "FAIL" end) \(.[0].title)"' "$dir/results.json"
+        fi
+        if [ "$status" = needs-human ] || [ "$status" = error ]; then
+          for f in "$S/smoke.txt" "$S/freeze.txt"; do
+            [ -f "$f" ] && { echo; echo '```'; cat "$f"; echo '```'; }
+          done
+        fi
+        if [ "$status" = failed ] && [ -f "$S/round-$rounds/feedback.md" ]; then
+          echo
+          echo "## Last feedback"
+          echo '```'
+          cat "$S/round-$rounds/feedback.md"
+          echo '```'
+        fi
+        if [ -f "$suite/flows/$group.md" ]; then
+          for section in Differences "Not found"; do
+            body=$(awk -v h="## $section" '$0 == h { on = 1; next } /^## / { on = 0 } on' "$suite/flows/$group.md" | sed '/^[[:space:]]*$/d')
+            [ -n "$body" ] && { echo; echo "## $section (spec vs app)"; printf '%s\n' "$body"; }
+          done
+        fi
+        [ -f "$dir/review.md" ] && { echo; echo "## Review notes"; echo "See reports/$group/review.md"; }
+      } > "$dir/summary.md"
+
+      # Commits only this group's files and the suite's shared files, never anything
+      # else you have staged (git commit -- <paths> commits just those paths).
+      if [ "$INPUTS_COMMIT" = yes ] && [ "$status" != error ]; then
+        set --
+        for p in "$suite/flows/$group.md" "$suite/tests/$group.spec.ts" "$suite/helpers" \
+                 "$dir/summary.md" "$dir/review.md" "$suite/package.json" "$suite/package-lock.json" \
+                 "$suite/playwright.config.ts" "$suite/.gitignore" "$suite/tests/_smoke.spec.ts"; do
+          [ -e "$p" ] && set -- "$@" "$p"
+        done
+        git add -- "$@" && { git diff --cached --quiet -- "$@" || git commit -q -m "flows($group): $status" -- "$@"; }
+      fi
+
+      cat "$dir/summary.md"
+      echo
+      echo "FLOWS $status $group"
+      [ "$status" = done ]

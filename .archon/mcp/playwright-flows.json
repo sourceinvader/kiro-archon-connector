@@ -1,0 +1,13 @@
+{
+  "playwright": {
+    "command": "npx",
+    "args": [
+      "-y",
+      "@playwright/mcp@0.0.85",
+      "--headless",
+      "--isolated",
+      "--storage-state",
+      ".flows-auth/explore.json"
+    ]
+  }
+}
