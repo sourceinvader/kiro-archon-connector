@@ -179,6 +179,10 @@ launch, because it is found through `~/.local/bin`. **[Tested]**
   `run_command_tooluse_…`. **[Seen]**
 - **No token counts anywhere.** Usage is in credits (`turn_completion` → `usage`), and
   `context_usage` gives only percentages. **[Seen]**
+- Credits arrive once per turn, at `turn_completion`; nothing reports a running total
+  during the turn. Failed turns that did model work report credits; turns that failed
+  before any (throttled, overloaded, bad model, access denied, quota) have an empty
+  `promptTurnSummaries`, and an interrupted turn has no `turn_completion` at all. **[Seen]**
 
 ---
 
@@ -462,6 +466,15 @@ Not used by the connector (it wraps stream-json instead), but surveyed: **[Docs]
   `_session/terminate`); V3 negotiates them through `agentCapabilities._meta.kiro.extensionMethods`.
 - V2 ends a turn with a `TurnEnd` update; V3 from the `session/prompt` response. Stop
   reasons documented: `end_turn`, `refusal`.
+- **Account balance**: with `kiro-cli acp --agent-engine v3 --auth-method cli`, after
+  `initialize`, the JSON-RPC request `_kiro/account/getUsage` (params `{}`) answers in about
+  1.5 s, with no model call: `{success, message, data: {planName, billingCycleReset,
+  overagesEnabled, isEnterprise, usageBreakdowns: [{resourceType: "CREDIT", used, limit,
+  percentage, currentOverages, overageRate, overageCharges, currency, hasLimit}],
+  bonusCredits, addOnCredits, overageCapable}}`. It backs Kiro's `/usage` command (KAS
+  calls the control plane's `GetUsageLimits`), is **not** listed in `extensionMethods`, and
+  answers "Your plan is managed by admin" with no data for organisation-managed plans.
+  `overageRate` was 0.04 USD a credit. **[Tested]** on 2.37.1, 18 November 2026.
 
 ---
 

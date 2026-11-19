@@ -25,6 +25,17 @@ const portableFields = {
    * `denied_tools` still limit which tools exist.
    */
   trustAllTools: z.boolean().optional(),
+  /**
+   * US dollars per Kiro credit, used to report each turn's cost to Archon and to compare
+   * spend with budgets. Default 0.04, Kiro's price for credits beyond a plan's allowance.
+   */
+  creditPriceUsd: z.number().positive().optional(),
+  /**
+   * Most one workflow run may spend on Kiro, in US dollars. Checked before every Kiro turn
+   * of the run against the credits its earlier turns used; a node's own `maxBudgetUsd`
+   * caps that node the same way. A turn already running is never stopped.
+   */
+  runBudgetUsd: z.number().positive().optional(),
 };
 
 /** Settings that only make sense on this machine: excluded from run layers and snapshots. */

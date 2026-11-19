@@ -405,6 +405,85 @@ describe('cancellation', () => {
   });
 });
 
+describe('credits: cost, usage log and budgets', () => {
+  /** Credits the recorded text turn reports, and its cost at the default $0.04 a credit. */
+  const TEXT_CREDITS = 0.09680748258706467;
+  const TEXT_USD = TEXT_CREDITS * 0.04;
+  const node = (nodeId: string, extra: Record<string, unknown> = {}): SendQueryOptions => ({ nodeConfig: { nodeId, ...extra } });
+  const logLines = async (): Promise<Record<string, unknown>[]> =>
+    (await readFile(join(fake.archonHome, 'kiro-usage.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+  const warningCodes = (chunks: MessageChunk[]): string[] => chunks.flatMap(chunk => (chunk.type === 'warning' ? [chunk.code] : []));
+
+  test('every turn reports its cost and is logged with its credits', async () => {
+    const chunks = await turn('fixture:text', { ...node('a'), model: 'minimax-m2.5' });
+    expectSettledTurn(chunks);
+    expect(resultOf(chunks).cost).toBeCloseTo(TEXT_USD, 10);
+    expect(await logLines()).toEqual([
+      expect.objectContaining({ node: 'a', workflow: true, credits: TEXT_CREDITS, model: 'minimax-m2.5', status: 'success', cwd: fake.cwd }),
+    ]);
+  });
+
+  test('creditPriceUsd sets the price of a credit', async () => {
+    const chunks = await turn('fixture:text', { ...node('a'), assistantConfig: { creditPriceUsd: 1 } });
+    expect(resultOf(chunks).cost).toBeCloseTo(TEXT_CREDITS, 10);
+  });
+
+  test('a failed turn that reports no credits has no cost and no log line', async () => {
+    const chunks = await turn('fixture:throttled', node('a'));
+    expect(resultOf(chunks).failure).toBeDefined();
+    expect(resultOf(chunks).cost).toBeUndefined();
+    expect(existsSync(join(fake.archonHome, 'kiro-usage.jsonl'))).toBe(false);
+  });
+
+  test('run budget: the turn that crosses it warns; the next is refused before Kiro starts', async () => {
+    const budget = { assistantConfig: { runBudgetUsd: 0.005 } }; // between one and two text turns
+    const first = await turn('fixture:text', { ...node('a'), ...budget });
+    expect(warningCodes(first)).toEqual([]);
+
+    const second = await turn('fixture:text', { ...node('b'), ...budget });
+    expectSettledTurn(second);
+    expect(warningCodes(second)).toEqual(['kiro.run_budget_exceeded']);
+    expect(second.findIndex(chunk => chunk.type === 'warning')).toBeLessThan(second.findIndex(chunk => chunk.type === 'result'));
+    expect(resultOf(second).failure).toBeUndefined();
+
+    const third = await turn('fixture:text', { ...node('c'), ...budget });
+    expectSettledTurn(third);
+    expect(resultOf(third).failure).toEqual({ class: 'budget_exceeded', evidence: expect.stringContaining('Run budget reached') });
+    expect(resultOf(third).failure?.evidence).toContain('$0.0077 (0.19 credits)');
+    expect(await fake.invocations()).toHaveLength(2);
+  });
+
+  test("node budget: counts that node's turns only, from maxBudgetUsd on the node or the request", async () => {
+    const capped = await turn('fixture:text', node('repair', { maxBudgetUsd: 0.003 }));
+    expect(warningCodes(capped)).toEqual(['kiro.node_budget_exceeded']);
+
+    const again = await turn('fixture:text', { ...node('repair'), maxBudgetUsd: 0.003 });
+    expect(resultOf(again).failure).toEqual({ class: 'budget_exceeded', evidence: expect.stringContaining("node 'repair'") });
+
+    const other = await turn('fixture:text', node('other', { maxBudgetUsd: 0.003 }));
+    expect(resultOf(other).failure).toBeUndefined();
+    expect(await fake.invocations()).toHaveLength(2);
+  });
+
+  test('chat turns (no node) are logged but never budgeted', async () => {
+    const budget = { assistantConfig: { runBudgetUsd: 0.0001 }, maxBudgetUsd: 0.0001 };
+    for (let i = 0; i < 2; i += 1) {
+      const chunks = await turn('fixture:text', budget);
+      expect(resultOf(chunks).failure).toBeUndefined();
+      expect(warningCodes(chunks)).toEqual([]);
+    }
+    expect((await logLines()).map(line => line.workflow)).toEqual([false, false]);
+  });
+
+  test('an unusable usage log never blocks a turn: it runs unchecked, with warnings', async () => {
+    await mkdir(join(fake.archonHome, 'kiro-usage.jsonl'), { recursive: true }); // a directory, not a file
+    const chunks = await turn('fixture:text', { ...node('a'), assistantConfig: { runBudgetUsd: 1 } });
+    expectSettledTurn(chunks);
+    expect(resultOf(chunks).failure).toBeUndefined();
+    expect(warningCodes(chunks)).toEqual(['kiro.budget_unchecked', 'kiro.usage_log_failed']);
+  });
+});
+
 describe('credentials, models and diagnostics', () => {
   const check = (env: Record<string, string>, assistantConfig: Record<string, unknown> = { kiroPath: fake.bin }) =>
     provider.checkCredential({ env, signal: new AbortController().signal, assistantConfig });

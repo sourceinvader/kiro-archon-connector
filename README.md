@@ -141,6 +141,8 @@ assistants:
     effort: medium            # low | medium | high | xhigh | max (models without levels ignore it)
     trustAllTools: true       # default true; see "Tools and approval" below
     kiroPath: /opt/bin/kiro-cli   # only when kiro-cli is not on PATH (install-only setting)
+    runBudgetUsd: 2.00        # most one workflow run may spend on Kiro; see "Cost and budgets"
+    creditPriceUsd: 0.04      # dollars per Kiro credit (default 0.04, Kiro's overage price)
 ```
 
 Unknown or misspelled keys are rejected when Archon loads the config. A node's `model:`
@@ -166,11 +168,13 @@ The plugin also honours `KIRO_CLI_PATH` and `KIRO_API_KEY` from the environment.
 | `archon doctor` | CLI version, login, configured model | `diagnose`, `listModels` |
 | Credential preflight | `kiro-cli whoami --format json`; `KIRO_API_KEY` counts as usable | native auth only |
 | Per-turn environment | Archon's request env is passed to `kiro-cli` | `envInjection: true` |
+| Cost | Kiro's per-turn credits × `creditPriceUsd`, shown per node and per run | `costReporting: true` |
+| `maxBudgetUsd` and `runBudgetUsd` | Checked before each turn against the credits already spent; over a cap, the turn is refused as `budget_exceeded` | `costControl: true` |
 
 Not supported (declared `false`, so Archon warns or refuses before spending anything):
 hooks, inline sub-agents, Archon's chat tools (`invoke_workflow`, `manage_run`; Archon's
 chat falls back to running `archon` commands through the shell), container execution,
-session fork (named `context: { resume: node }`), spend limits, fallback models.
+session fork (named `context: { resume: node }`), token counts, fallback models.
 
 Without fork, a workflow with a named `context: { resume: node }` fails to load (`archon
 validate` names the node). That includes a `loop_group`'s named owner sessions. Plain
@@ -259,11 +263,53 @@ Signed-out headless Kiro starts an interactive browser login instead of failing.
 runs `kiro-cli whoami --format json` before every turn (unless `KIRO_API_KEY` is set) and
 fails the node as `auth` when no account is signed in, so a workflow never opens a browser.
 
-### Cost reporting
+### Cost and budgets
 
-Kiro reports usage in credits, not money, and no token counts. Archon therefore shows
-`Cost: unknown` for Kiro nodes. Pick a cheap model with `kiro-cli chat --list-models`
-(the `rate_multiplier` column).
+Kiro reports how many credits each turn used, and no token counts. The plugin turns credits
+into dollars at `creditPriceUsd` (default $0.04, the price Kiro charges for credits beyond
+a plan's allowance; set your own to match your plan), so Archon shows a cost for every Kiro
+node and a total for the run. Pick a cheap model with `kiro-cli chat --list-models` (the
+`rate_multiplier` column).
+
+Two caps, both in dollars:
+
+```yaml
+# .archon/config.yaml: a cap for each workflow run
+assistants:
+  kiro:
+    runBudgetUsd: 2.00
+```
+
+```yaml
+# a workflow node: a cap for this node, counted across all its loop rounds in the run
+- id: repair
+  prompt: ...
+  maxBudgetUsd: 0.40          # 10 credits at $0.04
+```
+
+To change the run cap for one run, pass a config layer:
+`archon workflow run my-flow --config budget.yaml`, where `budget.yaml` holds the
+`assistants.kiro.runBudgetUsd` block.
+
+How they work:
+
+- Before every Kiro turn of a workflow, the plugin adds up what the run, and the node,
+  already spent. At or over a cap, the turn is refused before Kiro starts, as
+  `budget_exceeded` ("Node 'x' exceeded cost cap"), which Archon never retries.
+- Kiro reports credits only when a turn ends, so a running turn is never stopped. The turn
+  that crosses a cap finishes, with a warning saying by how much; the next one is refused.
+  Nodes that start in parallel are each checked before any of them finishes, so each can
+  overshoot by one turn.
+- A cancelled turn reports no credits, so it is not counted.
+- Every turn that reported credits is logged, one JSON line each, to
+  `$ARCHON_HOME/kiro-usage.jsonl` (default `~/.archon/kiro-usage.jsonl`): time, run, working
+  directory, node, credits, dollars, model, session and status. The budgets are added up
+  from this file; `jq` sums it for your own reports.
+- Archon passes no run id to providers. A run is the Archon process that started the turn,
+  plus its working directory, so `archon workflow run --resume` starts the run budget again
+  from zero. Chat turns (outside workflows) are logged but never capped.
+- If the log cannot be read or written, the turn still runs, with a `kiro.budget_unchecked`
+  or `kiro.usage_log_failed` warning.
 
 ## Testing
 

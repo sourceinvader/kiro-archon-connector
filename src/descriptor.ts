@@ -40,9 +40,14 @@ export const KIRO_CAPABILITIES: ProviderCapabilities = {
   structuredOutput: 'best-effort',
   requiresAllPropertiesRequired: false,
   envInjection: true,
-  costControl: false,
-  // Kiro reports usage in credits, not money, and no token counts.
-  costReporting: false,
+  // A node's `maxBudgetUsd` and `assistants.kiro.runBudgetUsd` are checked before each turn
+  // against the credits earlier turns used (src/budget.ts); over a cap, the turn is refused
+  // as `budget_exceeded`. Kiro reports credits only when a turn ends, so a turn already
+  // running is not stopped, and the turn that crosses a cap finishes with a warning.
+  costControl: true,
+  // Kiro reports credits per turn; the result's `cost` is credits × `creditPriceUsd`.
+  costReporting: true,
+  // Kiro reports no token counts.
   tokenReporting: false,
   stopReasonReporting: true,
   turnCountReporting: false,

@@ -454,6 +454,27 @@ range, checked at install. **[Docs]**
 - Older Archon binaries reject unknown receipt kinds; remove plugins before downgrading.
   **[Docs]**
 
+### Plugin processes, run identity and budgets (Archon 0.14.0, fake Kiro)
+
+- **Archon starts a new plugin process for every turn**, nodes and `loop_group` rounds
+  alike. Nothing a plugin keeps in memory survives to the next turn. **[Tested]**
+- Every plugin process of one `archon workflow run` has the same parent, that run's
+  `archon` process; a second run had a different one. Archon passes providers no run id
+  (and replaces the request env with the plugin's own on host runs), so the Kiro plugin
+  identifies a run by that parent (pid plus start time) and the working directory.
+  `archon serve` was not checked. **[Tested]**
+- **Unknown node keys are dropped**: `archon validate` warns "unknown key 'x' will be
+  ignored", so a provider cannot add its own node fields. **[Tested]**
+- `maxBudgetUsd` on a node of a provider with `costControl: false` validates, then warns at
+  run time "Node 'a' uses maxBudgetUsd but kiro doesn't support it — this will be ignored".
+  With `costControl: true` it reaches the provider, together with `nodeConfig.nodeId`. A
+  `budget_exceeded` result prints "Node 'c' exceeded cost cap" (with the cap, rounded to
+  cents, when the node set one) and is not retried; inside a `loop_group` it fails the
+  group. **[Tested]**
+- A result's `cost` is shown per node and summed into the run's `Cost:` line. **[Tested]**
+- `archon workflow run --config <file>` loads a sparse config layer (such as
+  `assistants.kiro.runBudgetUsd`) for one run. **[Tested]**
+
 ### Provider plugin wire protocol (protocol 3)
 
 - **Newline-delimited JSON-RPC 2.0 on stdin/stdout. Stdout is RPC only** (route

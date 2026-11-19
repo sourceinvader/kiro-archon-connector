@@ -9,9 +9,11 @@ export interface FakeKiro {
   home: string;
   /** A git-less workspace directory to run turns in. */
   cwd: string;
+  /** Throwaway ARCHON_HOME, where the plugin keeps its Kiro usage log. */
+  archonHome: string;
   logFile: string;
   stateDir: string;
-  /** Environment for a turn: HOME, PATH, log/state locations, plus overrides. */
+  /** Environment for a turn: HOME, ARCHON_HOME, PATH, log/state locations, plus overrides. */
   env(overrides?: Record<string, string>): Record<string, string>;
   invocations(): Promise<{ args: string[]; cwd: string; prompt: string; agentFile?: Record<string, unknown> }[]>;
   cleanup(): Promise<void>;
@@ -25,6 +27,7 @@ export async function createFakeKiro(): Promise<FakeKiro> {
   const home = join(root, 'home');
   const cwd = join(root, 'work');
   const stateDir = join(root, 'state');
+  const archonHome = join(root, 'archon-home');
   await Promise.all([binDir, home, cwd, stateDir].map(dir => mkdir(dir, { recursive: true })));
   const bin = join(binDir, 'kiro-cli');
   const quote = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`;
@@ -35,6 +38,7 @@ export async function createFakeKiro(): Promise<FakeKiro> {
     bin,
     home,
     cwd,
+    archonHome,
     logFile,
     stateDir,
     env(overrides = {}) {
@@ -42,7 +46,7 @@ export async function createFakeKiro(): Promise<FakeKiro> {
       for (const [key, value] of Object.entries(process.env)) {
         if (value !== undefined && !key.startsWith('KIRO_') && !key.startsWith('FAKE_KIRO_')) env[key] = value;
       }
-      return { ...env, HOME: home, FAKE_KIRO_LOG: logFile, FAKE_KIRO_STATE: stateDir, ...overrides };
+      return { ...env, HOME: home, ARCHON_HOME: archonHome, FAKE_KIRO_LOG: logFile, FAKE_KIRO_STATE: stateDir, ...overrides };
     },
     async invocations() {
       try {

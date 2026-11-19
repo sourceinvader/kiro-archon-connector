@@ -34,7 +34,9 @@ describe('descriptor', () => {
       hooks: false,
       nativeTools: false,
       containerExec: false,
-      costReporting: false,
+      costControl: true,
+      costReporting: true,
+      tokenReporting: false,
     });
   });
 
@@ -57,6 +59,15 @@ describe('config schemas', () => {
     ).toEqual({ model: 'minimax-m2.5', agent: 'reviewer', effort: 'high', trustAllTools: false, kiroPath: '/opt/kiro-cli' });
   });
 
+  test('budget settings: positive dollar amounts, layerable per run', () => {
+    expect(installConfigSchema.parse({ creditPriceUsd: 0.05, runBudgetUsd: 2 })).toEqual({ creditPriceUsd: 0.05, runBudgetUsd: 2 });
+    expect(runConfigSchema.parse({ runBudgetUsd: 0.5 })).toEqual({ runBudgetUsd: 0.5 });
+    for (const bad of [0, -1, '2']) {
+      expect(installConfigSchema.safeParse({ runBudgetUsd: bad }).success).toBe(false);
+      expect(installConfigSchema.safeParse({ creditPriceUsd: bad }).success).toBe(false);
+    }
+  });
+
   test('typos and wrong types are rejected instead of silently dropped', () => {
     expect(installConfigSchema.safeParse({ modle: 'x' }).success).toBe(false);
     expect(installConfigSchema.safeParse({ effort: 'ultra' }).success).toBe(false);
@@ -71,7 +82,14 @@ describe('config schemas', () => {
 
   test('JSON Schemas are generated for each scope', () => {
     expect(configJsonSchemas.install).toMatchObject({ type: 'object', additionalProperties: false });
-    expect(Object.keys(configJsonSchemas.run.properties as object).sort()).toEqual(['agent', 'effort', 'model', 'trustAllTools']);
+    expect(Object.keys(configJsonSchemas.run.properties as object).sort()).toEqual([
+      'agent',
+      'creditPriceUsd',
+      'effort',
+      'model',
+      'runBudgetUsd',
+      'trustAllTools',
+    ]);
     expect(JSON.stringify(configJsonSchemas.install)).toContain('x-archon-normalize');
   });
 

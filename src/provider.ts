@@ -19,6 +19,18 @@ import {
   type EphemeralAgent,
   type EphemeralAgentSpec,
 } from './agent-file';
+import {
+  budgetOverruns,
+  budgetRefusal,
+  currentRunId,
+  DEFAULT_CREDIT_PRICE_USD,
+  readSpend,
+  recordUsage,
+  usageLogPath,
+  type BudgetCaps,
+  type Spend,
+  type UsageEntry,
+} from './budget';
 import { kiroEffort, readAssistantConfig, type KiroEffort } from './config';
 import { KIRO_CAPABILITIES, PROVIDER_ID } from './descriptor';
 import { classifyKiroFailure } from './failure';
@@ -42,9 +54,24 @@ export interface TurnSettings {
   mcpPath?: string;
   /** The node's `skills:` names. */
   skillNames?: string[];
+  /** The workflow node's id, for its budget and the usage log. */
+  nodeId?: string;
+  /** US dollars per Kiro credit. */
+  creditPriceUsd: number;
+  /** Spending caps; set only on workflow turns. */
+  budget: BudgetCaps;
 }
 
 type Env = Record<string, string>;
+
+/** Where this turn's credits are logged, and what the run and node spent before it. */
+interface TurnUsage {
+  path: string;
+  run: string;
+  cwd: string;
+  /** Spend before this turn; set only when a budget applies and the log was readable. */
+  before?: Spend;
+}
 
 function subprocessEnv(options: Pick<SendQueryOptions, 'env' | 'execContext'>): Env {
   const env: Env = {};
@@ -57,6 +84,10 @@ function subprocessEnv(options: Pick<SendQueryOptions, 'env' | 'execContext'>): 
 function stringList(value: unknown): string[] | undefined {
   if (!Array.isArray(value)) return undefined;
   return value.filter((entry): entry is string => typeof entry === 'string' && entry.trim().length > 0).map(entry => entry.trim());
+}
+
+function positiveNumber(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : undefined;
 }
 
 function promptText(input: SystemPromptInput | undefined): string | undefined {
@@ -77,10 +108,19 @@ export function resolveTurnSettings(options: SendQueryOptions, env: Env): TurnSe
   const appendSystemPrompt = options.appendSystemPrompt?.trim() ? options.appendSystemPrompt : undefined;
   const mcpPath = nodeMcpPath(node?.mcp);
   const skillNames = nodeSkillNames(node?.skills);
+  const nodeId = typeof node?.nodeId === 'string' && node.nodeId.trim() ? node.nodeId.trim() : undefined;
+  const runBudget = node !== undefined ? config.runBudgetUsd : undefined;
+  const nodeBudget = node !== undefined ? (positiveNumber(options.maxBudgetUsd) ?? positiveNumber(node.maxBudgetUsd)) : undefined;
   return {
     workflow: node !== undefined,
     ...(mcpPath ? { mcpPath } : {}),
     ...(skillNames ? { skillNames } : {}),
+    ...(nodeId ? { nodeId } : {}),
+    creditPriceUsd: config.creditPriceUsd ?? DEFAULT_CREDIT_PRICE_USD,
+    budget: {
+      ...(runBudget !== undefined ? { runUsd: runBudget } : {}),
+      ...(nodeBudget !== undefined ? { nodeUsd: nodeBudget } : {}),
+    },
     bin: config.kiroPath ?? (env.KIRO_CLI_PATH?.trim() || 'kiro-cli'),
     ...(model ? { model } : {}),
     ...(config.agent ? { agent: config.agent } : {}),
@@ -156,6 +196,26 @@ export class KiroProvider implements IAgentProvider {
     if (prompt.trim().length === 0) {
       yield* this.failTurn('misconfigured', 'Kiro needs a non-empty instruction');
       return;
+    }
+
+    // Budgets: refuse the turn before Kiro starts when the run or node already spent its cap.
+    const usage: TurnUsage = { path: usageLogPath(env), run: currentRunId(), cwd };
+    const { budget } = settings;
+    if (budget.runUsd !== undefined || budget.nodeUsd !== undefined) {
+      try {
+        usage.before = readSpend(usage.path, { run: usage.run, cwd, ...(settings.nodeId ? { node: settings.nodeId } : {}) });
+      } catch (error) {
+        yield {
+          type: 'warning',
+          code: 'kiro.budget_unchecked',
+          message: `Could not read the Kiro usage log ${usage.path} (${error instanceof Error ? error.message : String(error)}); this turn runs without a budget check.`,
+        };
+      }
+      const refusal = usage.before && budgetRefusal(usage.before, budget, settings.creditPriceUsd, settings.nodeId);
+      if (refusal) {
+        yield* this.failTurn('budget_exceeded', refusal);
+        return;
+      }
     }
 
     // Signed-out headless Kiro starts an interactive browser login instead of failing,
@@ -255,6 +315,7 @@ export class KiroProvider implements IAgentProvider {
       if (signal?.aborted) {
         // Cancelled: close what the stream opened, but never claim the turn settled.
         yield* mapper.finish(true);
+        this.recordTurn(usage, settings, mapper, 'cancelled');
         return;
       }
       if (spawnError) {
@@ -275,6 +336,9 @@ export class KiroProvider implements IAgentProvider {
       }
 
       const result = await this.buildResult({ mapper, exit, resumeSessionId, cwd, env, settings, options });
+      const credits = mapper.summary.credits;
+      if (credits !== undefined) result.cost = credits * settings.creditPriceUsd;
+      yield* this.recordTurn(usage, settings, mapper, result.failure ? 'failed' : 'success');
       // A finished run that never reported turn_start still passed the startup gate.
       if (!mcpAnnounced && !result.failure) yield* announceMcp();
       if (result.failure) {
@@ -336,6 +400,42 @@ export class KiroProvider implements IAgentProvider {
       if (exists === false) result.sessionNotFound = true;
     }
     return result;
+  }
+
+  /**
+   * Log the credits Kiro reported for this turn and return warnings for a usage log that
+   * could not be written and for caps this turn took the totals past.
+   */
+  private recordTurn(usage: TurnUsage, settings: TurnSettings, mapper: KiroStreamMapper, status: UsageEntry['status']): MessageChunk[] {
+    const credits = mapper.summary.credits;
+    if (credits === undefined) return [];
+    const warnings: MessageChunk[] = [];
+    try {
+      recordUsage(usage.path, {
+        time: new Date().toISOString(),
+        run: usage.run,
+        cwd: usage.cwd,
+        ...(settings.nodeId ? { node: settings.nodeId } : {}),
+        workflow: settings.workflow,
+        credits,
+        usd: credits * settings.creditPriceUsd,
+        ...(settings.model ? { model: settings.model } : {}),
+        ...(mapper.summary.sessionId ? { sessionId: mapper.summary.sessionId } : {}),
+        status,
+      });
+    } catch (error) {
+      warnings.push({
+        type: 'warning',
+        code: 'kiro.usage_log_failed',
+        message: `Could not write the Kiro usage log ${usage.path} (${error instanceof Error ? error.message : String(error)}); this turn's credits are not counted toward budgets.`,
+      });
+    }
+    if (usage.before) {
+      for (const overrun of budgetOverruns(usage.before, credits, settings.budget, settings.creditPriceUsd, settings.nodeId)) {
+        warnings.push({ type: 'warning', ...overrun });
+      }
+    }
+    return warnings;
   }
 
   private async *failTurn(failureClass: ProviderFailureClass, evidence: string): AsyncGenerator<MessageChunk> {
